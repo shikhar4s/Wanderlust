@@ -14,7 +14,7 @@ class TouristProfile(models.Model):
 
 class GuideProfile(models.Model):
  user=models.OneToOneField(User,on_delete=models.CASCADE,related_name='guide_profile')
- bio=models.TextField(blank=True);photo_url=models.URLField(blank=True);languages=models.JSONField(default=list);specialties=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True);onboarding_complete=models.BooleanField(default=False)
+ bio=models.TextField(blank=True);photo_url=models.URLField(blank=True);languages=models.JSONField(default=list);specialties=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True);onboarding_complete=models.BooleanField(default=False);timezone=models.CharField(max_length=64,default='UTC')
 
 class Destination(models.Model):
  name=models.CharField(max_length=160);country=models.CharField(max_length=120);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True)
@@ -76,8 +76,11 @@ class Booking(models.Model):
  @classmethod
  def confirm(cls,request,final_price):
   with transaction.atomic():
-   GuideProfile.objects.select_for_update().get(pk=request.guide_id)
-   if not request.guide.accepting_bookings: raise ValidationError('Guide is not accepting bookings.')
+   if final_price<=0:raise ValidationError('Booking price must be positive.')
+   guide=GuideProfile.objects.select_for_update().get(pk=request.guide_id)
+   if request.status!='ACCEPTED': raise ValidationError('Only accepted requests can be confirmed.')
+   from .services import AvailabilityService
+   if not AvailabilityService.contains(guide,request.start,request.end): raise ValidationError('Guide is unavailable during that time.')
    conflict=cls.objects.filter(guide=request.guide,status='CONFIRMED',start__lt=request.end,end__gt=request.start).exists()
    if conflict: raise ValidationError('This guide is already booked during that time.')
    booking=cls.objects.create(request=request,tourist=request.tourist,guide=request.guide,trip=request.trip,service=request.service,start=request.start,end=request.end,destination=request.trip.destination,original_price=request.service.price,final_price=final_price)

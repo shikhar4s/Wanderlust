@@ -6,9 +6,9 @@ Wanderlust is a travel-planning and local-guide marketplace for building geograp
 
 ## What works
 
-- Responsive Tourist experience: discovery, attraction cards, selected-place trip builder, route workspace, saved trips and local-guide marketplace.
+- Responsive Tourist experience: discovery, attraction cards, selected-place trip builder, editable route workspace with Leaflet/OpenStreetMap markers and lines, saved trips and local-guide marketplace.
 - Deterministic itinerary generation based on coordinates, geographic grouping and nearest-neighbour ordering. It does not use an LLM and does not claim a mathematically optimal route.
-- A trip-aware Travel Assistant boundary that never mutates a trip and degrades safely when no provider key is configured.
+- A trip-aware Travel Assistant endpoint that never mutates a trip and returns an explicit configuration error when no provider is configured.
 - One token-auth architecture with Tourist and Guide roles.
 - Normalized guide coverage at city, region, area or attraction level; multiple services with fixed or negotiable pricing.
 - Weekly availability and date-time exceptions, plus a master `accepting_bookings` control.
@@ -17,11 +17,13 @@ Wanderlust is a travel-planning and local-guide marketplace for building geograp
 - Review eligibility tied to the Tourist on a completed booking.
 - Separate Tourist and Guide signup/login routes backed by JWT, unique email identities, persisted sessions and matching frontend/backend role enforcement.
 - Live global destination geocoding plus OpenStreetMap/Overpass attraction discovery with a cached-results fallback.
-- A complete Tourist persistence slice: select attractions, create a dated trip, generate and store day/stop records, refresh, list trips and reopen the saved itinerary.
+- Tourist persistence: select attractions, generate/store a dated trip, reorder/move/add/remove stops, optimize a day, save notes and reopen after refresh.
+- Guide profile, coverage, services, weekly hours, exceptions and booking toggle screens backed by Django APIs.
+- Request, REST chat, price offers, booking confirmation/cancellation, reviews and notifications backed by database records.
 
 ## Current implementation boundary
 
-The Tourist authentication and core trip flow are connected end to end. Guide management write screens, real-time negotiation UI, production AI provider integration and interactive Leaflet editing remain intentionally disabled in the frontend until their APIs are completed; the interface does not report fake successes for those capabilities.
+Core Tourist and Guide write flows are connected to the backend. Messaging uses authenticated Channels WebSockets with periodic REST refresh as a fallback. AI guidance requires a configured server-side OpenAI-compatible provider (`AI_API_KEY`, `AI_API_URL`, `AI_MODEL`). Destination imagery and OpenStreetMap tile loading depend on external services. PostgreSQL/Redis and production deployment still need to be configured for concurrent use.
 
 ## Architecture
 
@@ -62,7 +64,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The UI has realistic demo content so product flows remain inspectable without third-party credentials.
+Open `http://localhost:5173`. Accounts, trips, guides and requests come from the backend database, not frontend placeholders.
 
 ### Backend
 
@@ -97,7 +99,9 @@ Suggested providers:
 - Places: OpenTripMap, Foursquare or Google Places through `PlacesService`.
 - Routing: OSRM, Mapbox or Google Routes through `RoutingService`.
 - Images: Unsplash or another licensed image provider through an image service.
-- AI: a server-side model provider through `AIService`.
+- AI: an OpenAI-compatible chat completion endpoint configured only on the server.
+
+The default public Nominatim service is suitable only for low-volume development. Its [usage policy](https://operations.osmfoundation.org/policies/nominatim/) caps an application at one request per second and requires identification, caching, and attribution. The current cache/rate slot is process-local; configure `GEOCODING_API_URL` to an appropriate provider or self-hosted instance before scaling across workers. Public Overpass instances may also be overloaded, so the UI shows cached attraction data when available.
 
 ## Core logic
 
@@ -111,11 +115,11 @@ Availability combines recurring weekday intervals with explicit available/unavai
 
 ### AI assistant
 
-The assistant receives destination, dates, days and stops as context. It returns guidance only. Any provider-suggested place must be resolved through the place service before the UI exposes “Add to trip,” and every mutation requires explicit confirmation.
+The assistant receives destination, dates, days and stops as context. It returns guidance only. No AI suggestion is offered as a one-click trip addition; users must verify and add a place themselves through Discover or the planner.
 
 ### Chat and negotiation
 
-Channels authorizes membership before accepting a socket. Messages are append-only with timestamps/read state. Negotiation offers are also append-only so counteroffers never erase history; the booking snapshots both original and final agreed price.
+WebSocket chat requires JWT authentication and conversation membership, persists messages with timestamps/read state, and falls back to REST plus periodic refresh. Negotiation offers are append-only so counteroffers never erase history; the booking snapshots both original and final agreed price.
 
 ## Testing
 
