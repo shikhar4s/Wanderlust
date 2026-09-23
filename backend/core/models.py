@@ -6,6 +6,7 @@ from django.db.models import Q
 class User(AbstractUser):
  class Role(models.TextChoices): TOURIST='TOURIST';GUIDE='GUIDE'
  role=models.CharField(max_length=10,choices=Role.choices,default=Role.TOURIST)
+ email=models.EmailField(unique=True)
 
 class TouristProfile(models.Model):
  user=models.OneToOneField(User,on_delete=models.CASCADE,related_name='tourist_profile')
@@ -13,7 +14,7 @@ class TouristProfile(models.Model):
 
 class GuideProfile(models.Model):
  user=models.OneToOneField(User,on_delete=models.CASCADE,related_name='guide_profile')
- bio=models.TextField(blank=True);languages=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True)
+ bio=models.TextField(blank=True);photo_url=models.URLField(blank=True);languages=models.JSONField(default=list);specialties=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True);onboarding_complete=models.BooleanField(default=False)
 
 class Destination(models.Model):
  name=models.CharField(max_length=160);country=models.CharField(max_length=120);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True)
@@ -90,4 +91,3 @@ class Review(models.Model):
 
 class Notification(models.Model):
  user=models.ForeignKey(User,on_delete=models.CASCADE,related_name='notifications');kind=models.CharField(max_length=40);title=models.CharField(max_length=180);body=models.TextField(blank=True);read_at=models.DateTimeField(null=True,blank=True);created_at=models.DateTimeField(auto_now_add=True)
-

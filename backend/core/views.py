@@ -2,11 +2,26 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework import viewsets,status
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny,BasePermission,IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from .models import *
 from .serializers import *
-from .services import ItineraryService,LocationService
+from .services import ItineraryService,LocationService,PlacesService
+
+class IsTourist(BasePermission):
+ def has_permission(self,request,view):return request.user.is_authenticated and request.user.role=='TOURIST'
+class IsGuide(BasePermission):
+ def has_permission(self,request,view):return request.user.is_authenticated and request.user.role=='GUIDE'
+
+class AuthViewSet(viewsets.ViewSet):
+ permission_classes=[AllowAny]
+ @action(detail=False,methods=['post'])
+ def signup(self,request):
+  serializer=SignupSerializer(data=request.data);serializer.is_valid(raise_exception=True);user=serializer.save();refresh=RefreshToken.for_user(user)
+  return Response({'access':str(refresh.access_token),'refresh':str(refresh),'user':UserSerializer(user).data},status=201)
+ @action(detail=False,methods=['get'],permission_classes=[IsAuthenticated])
+ def me(self,request):return Response(UserSerializer(request.user).data)
 
 class OwnerMixin:
  def get_queryset(self): return super().get_queryset().filter(tourist=self.request.user)
@@ -17,10 +32,25 @@ class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
  def search(self,request):
   q=request.query_params.get('q','').strip()
   if not q:return Response({'detail':'Enter a destination.'},status=400)
-  try:return Response({'provider':'OpenStreetMap Nominatim','results':LocationService().search(q)})
+  try:
+   locations=LocationService().search(q)
+   if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
+   hit=locations[0];parts=hit.get('display_name',q).split(',');dest,_=Destination.objects.update_or_create(provider_id=f"nominatim:{hit['place_id']}",defaults={'name':parts[0].strip(),'country':parts[-1].strip(),'latitude':float(hit['lat']),'longitude':float(hit['lon'])})
+   provider_warning=None
+   try:
+    live=PlacesService().nearby(dest.latitude,dest.longitude)
+    for item in live:Place.objects.update_or_create(provider_id=item.pop('provider_id'),defaults={**item,'destination':dest})
+   except Exception:provider_warning='Attractions provider is temporarily unavailable; showing cached results.'
+   data=DestinationSerializer(dest).data
+   if provider_warning:data['warning']=provider_warning
+   return Response(data)
   except Exception:return Response({'detail':'Live search is temporarily unavailable.','retryable':True},status=503)
-class PlaceViewSet(viewsets.ReadOnlyModelViewSet):queryset=Place.objects.select_related('destination');serializer_class=PlaceSerializer
+class PlaceViewSet(viewsets.ReadOnlyModelViewSet):
+ queryset=Place.objects.select_related('destination');serializer_class=PlaceSerializer
+ def get_queryset(self):
+  qs=super().get_queryset();destination=self.request.query_params.get('destination');return qs.filter(destination_id=destination) if destination else qs
 class TripViewSet(OwnerMixin,viewsets.ModelViewSet):
+ permission_classes=[IsTourist]
  queryset=Trip.objects.select_related('destination').prefetch_related('days__stops__place');serializer_class=TripSerializer
  @action(detail=True,methods=['post'])
  def generate(self,request,pk=None):
@@ -36,6 +66,7 @@ class TripViewSet(OwnerMixin,viewsets.ModelViewSet):
 class GuideViewSet(viewsets.ReadOnlyModelViewSet):
  queryset=GuideProfile.objects.select_related('user').prefetch_related('services','coverage','availability_rules');serializer_class=GuideProfileSerializer
 class GuideRequestViewSet(OwnerMixin,viewsets.ModelViewSet):
+ permission_classes=[IsTourist]
  queryset=GuideRequest.objects.select_related('guide__user','service','trip');serializer_class=GuideRequestSerializer
 class BookingViewSet(viewsets.ReadOnlyModelViewSet):
  serializer_class=BookingSerializer
@@ -47,4 +78,3 @@ class BookingViewSet(viewsets.ReadOnlyModelViewSet):
   try:booking=Booking.confirm(req,request.data.get('final_price',req.service.price))
   except ValidationError as e:return Response({'detail':e.message},status=409)
   return Response(self.get_serializer(booking).data,status=201)
-

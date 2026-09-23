@@ -15,6 +15,13 @@ Wanderlust is a travel-planning and local-guide marketplace for building geograp
 - Transactional guide locking and overlap revalidation at confirmation time. Only the confirmed interval is blocked; cancellation exposes the underlying schedule again.
 - Private, participant-authorized WebSocket conversations and append-only negotiation offers.
 - Review eligibility tied to the Tourist on a completed booking.
+- Separate Tourist and Guide signup/login routes backed by JWT, unique email identities, persisted sessions and matching frontend/backend role enforcement.
+- Live global destination geocoding plus OpenStreetMap/Overpass attraction discovery with a cached-results fallback.
+- A complete Tourist persistence slice: select attractions, create a dated trip, generate and store day/stop records, refresh, list trips and reopen the saved itinerary.
+
+## Current implementation boundary
+
+The Tourist authentication and core trip flow are connected end to end. Guide management write screens, real-time negotiation UI, production AI provider integration and interactive Leaflet editing remain intentionally disabled in the frontend until their APIs are completed; the interface does not report fake successes for those capabilities.
 
 ## Architecture
 
@@ -132,4 +139,3 @@ The included backend suite covers deterministic itinerary output, legal request 
 ## Screenshots
 
 The polished frontend includes desktop and mobile layouts for Discover, the itinerary planner, Your Trips, Local Guides and the Travel Assistant. Add release screenshots here after deploying to the target environment.
-
