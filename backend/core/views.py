@@ -32,6 +32,10 @@ class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
  def search(self,request):
   q=request.query_params.get('q','').strip()
   if not q:return Response({'detail':'Enter a destination.'},status=400)
+  city=q.split(',')[0].strip()
+  cached=Destination.objects.prefetch_related('places').filter(name__iexact=city).first()
+  if cached and cached.places.exists():
+   return Response(DestinationSerializer(cached).data)
   try:
    locations=LocationService().search(q)
    if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
@@ -44,7 +48,12 @@ class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
    data=DestinationSerializer(dest).data
    if provider_warning:data['warning']=provider_warning
    return Response(data)
-  except Exception:return Response({'detail':'Live search is temporarily unavailable.','retryable':True},status=503)
+  except Exception:
+   if cached:
+    data=DestinationSerializer(cached).data
+    data['warning']='Live search is temporarily unavailable; showing saved destination data.'
+    return Response(data)
+   return Response({'detail':'Live search is temporarily unavailable. Please try again.','retryable':True},status=503)
 class PlaceViewSet(viewsets.ReadOnlyModelViewSet):
  queryset=Place.objects.select_related('destination');serializer_class=PlaceSerializer
  def get_queryset(self):

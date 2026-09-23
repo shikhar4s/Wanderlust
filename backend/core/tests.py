@@ -5,6 +5,7 @@ from django.utils import timezone
 from .models import *
 from .services import ItineraryService
 from rest_framework.test import APIClient
+from unittest.mock import patch
 class CoreRulesTests(TestCase):
  def setUp(self):
   self.tourist=User.objects.create_user('tourist',email='tourist@example.com',role='TOURIST');self.guide_user=User.objects.create_user('guide',email='guide@example.com',role='GUIDE');self.guide=GuideProfile.objects.create(user=self.guide_user);self.dest=Destination.objects.create(name='Udaipur',country='India',latitude=24.58,longitude=73.68);self.cover=GuideCoverage.objects.create(guide=self.guide,level='CITY',destination=self.dest,label='Udaipur');self.service=GuideService.objects.create(guide=self.guide,title='Walk',description='Heritage walk',coverage=self.cover,duration_minutes=120,price=2000,pricing_type='NEGOTIABLE');self.trip=Trip.objects.create(tourist=self.tourist,destination=self.dest,title='Trip',start_date=timezone.localdate(),end_date=timezone.localdate()+timedelta(days=1))
@@ -31,3 +32,10 @@ class AuthenticationFlowTests(TestCase):
   response=self.client.post('/api/trips/',{},format='json');self.assertEqual(response.status_code,403)
  def test_duplicate_email_rejected(self):
   payload={'name':'Mira Sen','email':'mira@example.com','password':'StrongPass123','role':'TOURIST'};self.assertEqual(self.client.post('/api/auth/signup/',payload,format='json').status_code,201);self.assertEqual(self.client.post('/api/auth/signup/',payload,format='json').status_code,400)
+ def test_cached_destination_survives_provider_outage(self):
+  destination=Destination.objects.create(name='Udaipur',country='India',latitude=24.58,longitude=73.68)
+  Place.objects.create(destination=destination,name='City Palace',latitude=24.57,longitude=73.68)
+  with patch('core.views.LocationService.search',side_effect=RuntimeError('provider unavailable')):
+   response=self.client.get('/api/destinations/search/?q=Udaipur%2C%20India')
+  self.assertEqual(response.status_code,200)
+  self.assertEqual(response.data['places'][0]['name'],'City Palace')
