@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wanderlust
+      POSTGRES_USER: wanderlust
+      POSTGRES_PASSWORD: wanderlust_dev
+    volumes: [wanderlust_pg:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+  backend:
+    build: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes: [./backend:/app]
+    ports: ['8000:8000']
+    depends_on: [db,redis]
+    environment:
+      POSTGRES_DB: wanderlust
+      POSTGRES_USER: wanderlust
+      POSTGRES_PASSWORD: wanderlust_dev
+      POSTGRES_HOST: db
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    volumes: [./frontend:/app]
+    ports: ['5173:5173']
+volumes: {wanderlust_pg: {}}
+
