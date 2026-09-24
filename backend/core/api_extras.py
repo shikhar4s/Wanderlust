@@ -208,7 +208,6 @@ class AssistantViewSet(viewsets.ViewSet):
     permission_classes=[IsAuthenticated]
     @action(detail=False,methods=['post'])
     def ask(self,request):
-        if request.user.role!='TOURIST':return Response({'detail':'Tourist account required.'},status=403)
         question=str(request.data.get('question','')).strip()
         if not question:return Response({'detail':'Ask a question first.'},status=400)
         if len(question)>2000:return Response({'detail':'Question is too long.'},status=400)
@@ -217,6 +216,9 @@ class AssistantViewSet(viewsets.ViewSet):
             trip=get_object_or_404(Trip.objects.prefetch_related('days__stops__place').select_related('destination'),pk=request.data['trip_id'],tourist=request.user)
             context=f'Trip: {trip.destination.name}, {trip.destination.country}; {trip.start_date} to {trip.end_date}. '
             context+=' '.join(f'Day {day.position}: '+', '.join(stop.place.name for stop in day.stops.all()) for day in trip.days.all())
+        elif request.user.role=='GUIDE':
+            guide=guide_for(request.user)
+            context='Guide profile: '+', '.join(c.label for c in guide.coverage.all())+'; services: '+', '.join(s.title for s in guide.services.filter(active=True))
         try:
             return Response(AIService().advise(context,question))
         except AIService.Unavailable as exc:

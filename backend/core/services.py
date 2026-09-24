@@ -39,17 +39,15 @@ class ItineraryService:
   return groups+[[] for _ in range(days-count)]
 
 class LocationService:
- endpoint=os.getenv('GEOCODING_API_URL','https://nominatim.openstreetmap.org/search')
+ endpoint=os.getenv('GEOCODING_API_URL','https://geocoding-api.open-meteo.com/v1/search')
  def search(self,query):
   key='geocode:'+sha256(query.casefold().strip().encode()).hexdigest()
   saved=cache.get(key)
   if saved is not None:return saved
-  if not cache.add('nominatim-global-slot',True,timeout=1):raise RuntimeError('Geocoding is rate-limited; retry shortly.')
-  agent='WanderlustTravelPlanner/1.0'
-  if os.getenv('GEOCODING_CONTACT_EMAIL'):agent+=f" ({os.getenv('GEOCODING_CONTACT_EMAIL')})"
-  with httpx.Client(timeout=8,headers={'User-Agent':agent}) as client:
-   response=client.get(self.endpoint,params={'q':query,'format':'jsonv2','limit':5});response.raise_for_status();data=response.json()
-   cache.set(key,data,timeout=7*24*3600)
+  with httpx.Client(timeout=8,trust_env=False) as client:
+   response=client.get(self.endpoint,params={'name':query,'count':8,'language':'en','format':'json'});response.raise_for_status()
+   data=[{'provider_id':f"openmeteo:{item['id']}",'name':item['name'],'country':item.get('country',''),'region':item.get('admin1',''),'latitude':item['latitude'],'longitude':item['longitude']} for item in response.json().get('results',[]) if item.get('feature_code','').startswith('PPL')]
+   cache.set(key,data,timeout=24*3600)
    return data
 
 class PlacesService:
@@ -57,7 +55,7 @@ class PlacesService:
  def nearby(self,lat,lng,radius_km=15):
   query=f'[out:json][timeout:15];(nwr["tourism"~"attraction|museum|viewpoint|gallery"](around:{int(radius_km*1000)},{lat},{lng}););out center tags 40;'
   raw=None;last_error=None
-  with httpx.Client(timeout=22,headers={'User-Agent':'Wanderlust/1.0'}) as client:
+  with httpx.Client(timeout=22,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0'}) as client:
    for endpoint in self.endpoints:
     try:
      response=client.post(endpoint,data={'data':query});response.raise_for_status();raw=response.json().get('elements',[]);break
@@ -69,6 +67,9 @@ class PlacesService:
    point=item.get('center',item)
    if not name or 'lat' not in point:continue
    results.append({'provider_id':f"osm:{item['type']}:{item['id']}",'name':name,'description':tags.get('description') or tags.get('historic') or tags.get('tourism','Attraction').replace('_',' ').title(),'category':tags.get('tourism') or tags.get('historic') or 'attraction','latitude':point['lat'],'longitude':point['lon'],'rating':None,'image_url':ImageService.from_tags(tags)})
+  photos=ImageService.find_photos([item['name'] for item in results if not item['image_url']])
+  for item in results:
+   if not item['image_url']:item['image_url']=photos.get(item['name'].casefold(),'')
   return results
 
 class ImageService:
@@ -78,6 +79,24 @@ class ImageService:
   if image.startswith('https://') or image.startswith('http://'):return image
   if image.startswith('File:'):return 'https://commons.wikimedia.org/wiki/Special:FilePath/'+quote(image[5:])+'?width=900'
   return ''
+
+ @staticmethod
+ def find_photos(names):
+  """Fetch free page thumbnails in one request; omit unmatched places honestly."""
+  titles=list(dict.fromkeys(name.strip() for name in names if name.strip()))[:50]
+  if not titles:return {}
+  key='photos:'+sha256('|'.join(titles).encode()).hexdigest()
+  saved=cache.get(key)
+  if saved is not None:return saved
+  try:
+   with httpx.Client(timeout=10,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0 (https://github.com/shikhar4s/Wanderlust)'}) as client:
+    response=client.get('https://en.wikipedia.org/w/api.php',params={'action':'query','format':'json','prop':'pageimages','titles':'|'.join(titles),'pithumbsize':900,'pilicense':'free','redirects':1})
+    response.raise_for_status()
+    pages=response.json().get('query',{}).get('pages',{}).values()
+    result={page['title'].casefold():page['thumbnail']['source'] for page in pages if 'thumbnail' in page}
+    cache.set(key,result,timeout=24*3600)
+    return result
+  except (httpx.HTTPError,ValueError,KeyError):return {}
 
 class RoutingService:
  """OSRM-compatible route provider boundary with a straight-line fallback."""

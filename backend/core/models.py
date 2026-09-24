@@ -2,22 +2,31 @@ from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.db import models,transaction
 from django.db.models import Q
+from uuid import uuid4
+
+def profile_photo_path(instance,filename):
+ return f'profiles/{instance.pk}/{uuid4().hex}.{filename.rsplit(".",1)[-1].lower()}'
 
 class User(AbstractUser):
  class Role(models.TextChoices): TOURIST='TOURIST';GUIDE='GUIDE'
  role=models.CharField(max_length=10,choices=Role.choices,default=Role.TOURIST)
  email=models.EmailField(unique=True)
+ phone=models.CharField(max_length=30,blank=True)
+ profile_photo=models.FileField(upload_to=profile_photo_path,blank=True)
 
 class TouristProfile(models.Model):
  user=models.OneToOneField(User,on_delete=models.CASCADE,related_name='tourist_profile')
  bio=models.TextField(blank=True)
+ home_city=models.CharField(max_length=120,blank=True)
+ travel_style=models.CharField(max_length=120,blank=True)
+ interests=models.JSONField(default=list)
 
 class GuideProfile(models.Model):
  user=models.OneToOneField(User,on_delete=models.CASCADE,related_name='guide_profile')
  bio=models.TextField(blank=True);photo_url=models.URLField(blank=True);languages=models.JSONField(default=list);specialties=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True);onboarding_complete=models.BooleanField(default=False);timezone=models.CharField(max_length=64,default='UTC')
 
 class Destination(models.Model):
- name=models.CharField(max_length=160);country=models.CharField(max_length=120);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True)
+ name=models.CharField(max_length=160);country=models.CharField(max_length=120);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True);image_url=models.URLField(blank=True)
  class Meta: constraints=[models.UniqueConstraint(fields=['name','country'],name='unique_destination')]
 
 class Place(models.Model):

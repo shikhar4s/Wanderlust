@@ -1,6 +1,7 @@
 from datetime import timedelta
 from django.core.exceptions import ValidationError
 from django.test import TestCase,TransactionTestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from .models import *
 from .services import ItineraryService,AvailabilityService
@@ -56,10 +57,33 @@ class AuthenticationFlowTests(TestCase):
  def test_cached_destination_survives_provider_outage(self):
   destination=Destination.objects.create(name='Udaipur',country='India',latitude=24.58,longitude=73.68)
   Place.objects.create(destination=destination,name='City Palace',latitude=24.57,longitude=73.68)
-  with patch('core.views.LocationService.search',side_effect=RuntimeError('provider unavailable')):
+  with patch('core.views.LocationService.search',side_effect=RuntimeError('provider unavailable')),patch('core.views.ImageService.find_photos',return_value={}):
    response=self.client.get('/api/destinations/search/?q=Udaipur%2C%20India')
   self.assertEqual(response.status_code,200)
   self.assertEqual(response.data['places'][0]['name'],'City Palace')
+ def test_city_suggestions_and_image_enrichment(self):
+  with patch('core.views.LocationService.search',return_value=[{'provider_id':'openmeteo:1','name':'Jaipur','country':'India','region':'Rajasthan','latitude':26.9,'longitude':75.8}]):
+   suggestions=self.client.get('/api/destinations/suggest/?q=Jai')
+   self.assertEqual(suggestions.status_code,200)
+   self.assertEqual(suggestions.data['results'][0]['name'],'Jaipur')
+   with patch('core.views.PlacesService.nearby',return_value=[{'provider_id':'osm:way:1','name':'Hawa Mahal','description':'Palace','category':'attraction','latitude':26.9,'longitude':75.8,'rating':None,'image_url':''}]),patch('core.views.ImageService.find_photos',return_value={'jaipur':'https://example.com/city.jpg','hawa mahal':'https://example.com/place.jpg'}):
+    result=self.client.get('/api/destinations/search/?q=Jaipur&city_id=openmeteo%3A1')
+  self.assertEqual(result.status_code,200,result.data)
+  self.assertEqual(result.data['image_url'],'https://example.com/city.jpg')
+  self.assertEqual(result.data['places'][0]['image_url'],'https://example.com/place.jpg')
+ def test_tourist_profile_update_and_photo_upload(self):
+  user=User.objects.create_user('mira',email='mira@example.com',role='TOURIST');TouristProfile.objects.create(user=user);self.client.force_authenticate(user)
+  updated=self.client.patch('/api/auth/profile/',{'first_name':'Mira','home_city':'Pune','interests':['Food','Art']},format='json')
+  self.assertEqual(updated.status_code,200,updated.data)
+  self.assertEqual(updated.data['tourist']['home_city'],'Pune')
+  def save_without_disk(field,name,content,save=True):
+   field.name='profiles/test.png'
+   field.instance.save(update_fields=['profile_photo'])
+  with patch('django.db.models.fields.files.FieldFile.save',save_without_disk):
+   photo=SimpleUploadedFile('avatar.png',b'\x89PNG\r\n\x1a\n'+b'0'*24,content_type='image/png')
+   uploaded=self.client.post('/api/auth/photo/',{'photo':photo},format='multipart')
+   self.assertEqual(uploaded.status_code,200,uploaded.data)
+   self.assertIn('/media/profiles/',uploaded.data['photo_url'])
 
 class ConnectedFlowTests(TestCase):
  def setUp(self):
@@ -99,6 +123,23 @@ class ConnectedFlowTests(TestCase):
   before=Trip.objects.count();payload['place_ids']=[self.places[0].id,999999]
   self.assertEqual(self.client.post('/api/trips/plan/',payload,format='json').status_code,400)
   self.assertEqual(Trip.objects.count(),before)
+ def test_guide_request_can_create_day_trip_automatically(self):
+  cover=GuideCoverage.objects.create(guide=self.guide,level='CITY',destination=self.destination,label='Gwalior')
+  service=GuideService.objects.create(guide=self.guide,coverage=cover,title='Fort walk',description='Tour',duration_minutes=120,price=2000,pricing_type='FIXED',max_group_size=4)
+  AvailabilityRule.objects.create(guide=self.guide,weekday=self.start.weekday(),start_time='09:00',end_time='19:00')
+  self.auth(self.tourist)
+  result=self.client.post('/api/requests/',{'guide':self.guide.id,'service':service.id,'start':self.start.isoformat(),'end':(self.start+timedelta(hours=2)).isoformat(),'people':2},format='json')
+  self.assertEqual(result.status_code,201,result.data)
+  created=Trip.objects.get(pk=result.data['trip'])
+  self.assertEqual(created.destination,self.destination)
+  self.assertEqual(created.start_date,self.start.date())
+  self.auth(self.guide_user)
+  accepted=self.client.post(f"/api/requests/{result.data['id']}/transition/",{'status':'ACCEPTED'},format='json')
+  self.assertEqual(accepted.status_code,200,accepted.data)
+  confirmed=self.client.post('/api/bookings/confirm/',{'request_id':result.data['id']},format='json')
+  self.assertEqual(confirmed.status_code,201,confirmed.data)
+  self.auth(self.tourist)
+  self.assertEqual(self.client.get('/api/bookings/').data['count'],1)
  def test_guide_request_chat_booking_and_availability(self):
   self.auth(self.guide_user)
   cover=self.client.post('/api/coverage/',{'level':'CITY','destination':self.destination.id,'label':'Gwalior'},format='json')

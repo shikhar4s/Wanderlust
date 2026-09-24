@@ -6,8 +6,16 @@ from .models import Destination,Place,Trip,TripDay,TripStop,GuideProfile,GuideSe
 User=get_user_model()
 class UserSerializer(serializers.ModelSerializer):
  name=serializers.SerializerMethodField()
- class Meta:model=User;fields=['id','email','username','name','role']
+ photo_url=serializers.SerializerMethodField()
+ class Meta:model=User;fields=['id','email','username','name','role','first_name','last_name','phone','photo_url']
  def get_name(self,obj):return obj.get_full_name() or obj.username
+ def get_photo_url(self,obj):
+  request=self.context.get('request')
+  return request.build_absolute_uri(obj.profile_photo.url) if obj.profile_photo and request else (obj.profile_photo.url if obj.profile_photo else '')
+
+class TouristProfileSerializer(serializers.ModelSerializer):
+ user=UserSerializer(read_only=True)
+ class Meta:model=TouristProfile;fields=['user','bio','home_city','travel_style','interests']
 class SignupSerializer(serializers.Serializer):
  name=serializers.CharField(max_length=150);email=serializers.EmailField();password=serializers.CharField(write_only=True,min_length=8);confirm_password=serializers.CharField(write_only=True);terms=serializers.BooleanField();role=serializers.ChoiceField(choices=User.Role.choices)
  def validate(self,data):
@@ -52,13 +60,18 @@ class GuideServiceSerializer(serializers.ModelSerializer):
   return data
 class GuideProfileSerializer(serializers.ModelSerializer):
  services=GuideServiceSerializer(many=True,read_only=True)
- name=serializers.SerializerMethodField();email=serializers.EmailField(source='user.email',read_only=True);coverage=serializers.SerializerMethodField();rating=serializers.SerializerMethodField();review_count=serializers.SerializerMethodField()
+ name=serializers.SerializerMethodField();email=serializers.EmailField(source='user.email',read_only=True);coverage=serializers.SerializerMethodField();rating=serializers.SerializerMethodField();review_count=serializers.SerializerMethodField();photo_url=serializers.SerializerMethodField()
  class Meta:model=GuideProfile;fields='__all__'
  def get_name(self,obj):return obj.user.get_full_name() or obj.user.username
  def get_coverage(self,obj):return [{'id':x.id,'level':x.level,'label':x.label,'destination':x.destination_id,'place':x.place_id} for x in obj.coverage.all()]
  def get_rating(self,obj):return obj.reviews.aggregate(value=Avg('rating'))['value']
  def get_review_count(self,obj):return obj.reviews.count()
+ def get_photo_url(self,obj):
+  request=self.context.get('request')
+  if obj.user.profile_photo:return request.build_absolute_uri(obj.user.profile_photo.url) if request else obj.user.profile_photo.url
+  return obj.photo_url
 class GuideRequestSerializer(serializers.ModelSerializer):
+ trip=serializers.PrimaryKeyRelatedField(queryset=Trip.objects.all(),required=False,allow_null=True)
  guide_name=serializers.CharField(source='guide.user.get_full_name',read_only=True)
  tourist_name=serializers.CharField(source='tourist.get_full_name',read_only=True)
  service_title=serializers.CharField(source='service.title',read_only=True)

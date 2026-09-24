@@ -10,9 +10,10 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny,BasePermission,IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser
 from .models import *
 from .serializers import *
-from .services import ItineraryService,LocationService,PlacesService,AvailabilityService,distance_km
+from .services import ItineraryService,LocationService,PlacesService,AvailabilityService,ImageService,distance_km
 
 class IsTourist(BasePermission):
  def has_permission(self,request,view):return request.user.is_authenticated and request.user.role=='TOURIST'
@@ -26,7 +27,37 @@ class AuthViewSet(viewsets.ViewSet):
   serializer=SignupSerializer(data=request.data);serializer.is_valid(raise_exception=True);user=serializer.save();refresh=RefreshToken.for_user(user)
   return Response({'access':str(refresh.access_token),'refresh':str(refresh),'user':UserSerializer(user).data},status=201)
  @action(detail=False,methods=['get'],permission_classes=[IsAuthenticated])
- def me(self,request):return Response(UserSerializer(request.user).data)
+ def me(self,request):return Response(UserSerializer(request.user,context={'request':request}).data)
+ @action(detail=False,methods=['get','patch'],permission_classes=[IsAuthenticated])
+ def profile(self,request):
+  user=request.user
+  if request.method=='PATCH':
+   user.first_name=str(request.data.get('first_name',user.first_name)).strip()[:150]
+   user.last_name=str(request.data.get('last_name',user.last_name)).strip()[:150]
+   user.phone=str(request.data.get('phone',user.phone)).strip()[:30]
+   user.save(update_fields=['first_name','last_name','phone'])
+   if user.role=='TOURIST':
+    profile,_=TouristProfile.objects.get_or_create(user=user)
+    for field in ('bio','home_city','travel_style'):
+     if field in request.data:setattr(profile,field,str(request.data[field]).strip())
+    if 'interests' in request.data:
+     if not isinstance(request.data['interests'],list):return Response({'detail':'Interests must be a list.'},status=400)
+     profile.interests=[str(item).strip() for item in request.data['interests'] if str(item).strip()][:20]
+    profile.full_clean();profile.save()
+  data={'user':UserSerializer(user,context={'request':request}).data}
+  if user.role=='TOURIST':data['tourist']=TouristProfileSerializer(TouristProfile.objects.get(user=user),context={'request':request}).data
+  else:data['guide']=GuideProfileSerializer(user.guide_profile,context={'request':request}).data
+  return Response(data)
+ @action(detail=False,methods=['post'],permission_classes=[IsAuthenticated],parser_classes=[MultiPartParser])
+ def photo(self,request):
+  photo=request.FILES.get('photo')
+  if not photo:return Response({'detail':'Choose a photo to upload.'},status=400)
+  if photo.size>5*1024*1024:return Response({'detail':'Photo must be under 5 MB.'},status=400)
+  header=photo.read(16);photo.seek(0)
+  extension='png' if header.startswith(b'\x89PNG\r\n\x1a\n') else 'jpg' if header.startswith(b'\xff\xd8\xff') else 'webp' if header[:4]==b'RIFF' and header[8:12]==b'WEBP' else None
+  if not extension:return Response({'detail':'Upload a JPG, PNG or WebP photo.'},status=400)
+  user=request.user;user.profile_photo.save(f'portrait.{extension}',photo,save=True)
+  return Response(UserSerializer(user,context={'request':request}).data)
 
 class OwnerMixin:
  def get_queryset(self): return super().get_queryset().filter(tourist=self.request.user)
@@ -34,25 +65,44 @@ class OwnerMixin:
 class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
  queryset=Destination.objects.prefetch_related('places');serializer_class=DestinationSerializer
  @action(detail=False,methods=['get'],permission_classes=[AllowAny])
+ def suggest(self,request):
+  q=request.query_params.get('q','').strip()
+  if len(q)<2:return Response({'results':[]})
+  saved=[{'provider_id':d.provider_id,'name':d.name,'country':d.country,'region':'','latitude':d.latitude,'longitude':d.longitude} for d in Destination.objects.filter(name__istartswith=q)[:6]]
+  try:
+   live=LocationService().search(q)
+   seen={item['provider_id'] or f"{item['name']}:{item['country']}" for item in live}
+   return Response({'results':(live+[item for item in saved if (item['provider_id'] or f"{item['name']}:{item['country']}") not in seen])[:8]})
+  except Exception:return Response({'results':saved,'warning':'Showing saved cities while live suggestions are unavailable.'})
+ @action(detail=False,methods=['get'],permission_classes=[AllowAny])
  def search(self,request):
   q=request.query_params.get('q','').strip()
   if not q:return Response({'detail':'Enter a destination.'},status=400)
-  parts=[part.strip() for part in q.split(',') if part.strip()]
-  city=parts[0]
+  parts=[part.strip() for part in q.split(',') if part.strip()];city=parts[0];selected_id=request.query_params.get('city_id','')
   matches=Destination.objects.prefetch_related('places').filter(name__iexact=city)
-  cached=matches.filter(country__iexact=parts[-1]).first() if len(parts)>1 else matches.first()
+  cached=Destination.objects.prefetch_related('places').filter(provider_id=selected_id).first() if selected_id else (matches.filter(country__iexact=parts[-1]).first() if len(parts)>1 else matches.first())
+  def enrich(dest):
+   missing=list(dest.places.filter(image_url='')[:50])
+   names=[dest.name] if not dest.image_url else []
+   photos=ImageService.find_photos(names+[p.name for p in missing])
+   if not dest.image_url and photos.get(dest.name.casefold()):dest.image_url=photos[dest.name.casefold()];dest.save(update_fields=['image_url'])
+   for place in missing:
+    url=photos.get(place.name.casefold())
+    if url:place.image_url=url;place.save(update_fields=['image_url'])
+   return DestinationSerializer(Destination.objects.prefetch_related('places').get(pk=dest.pk)).data
   if cached and cached.places.exists():
-   return Response(DestinationSerializer(cached).data)
+   return Response(enrich(cached))
   try:
    locations=LocationService().search(q)
    if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
-   hit=locations[0];parts=hit.get('display_name',q).split(',');dest,_=Destination.objects.update_or_create(provider_id=f"nominatim:{hit['place_id']}",defaults={'name':parts[0].strip(),'country':parts[-1].strip(),'latitude':float(hit['lat']),'longitude':float(hit['lon'])})
+   hit=next((item for item in locations if item['provider_id']==selected_id),locations[0])
+   dest,_=Destination.objects.update_or_create(name=hit['name'],country=hit['country'],defaults={'provider_id':hit['provider_id'],'latitude':float(hit['latitude']),'longitude':float(hit['longitude'])})
    provider_warning=None
    try:
     live=PlacesService().nearby(dest.latitude,dest.longitude)
     for item in live:Place.objects.update_or_create(provider_id=item.pop('provider_id'),defaults={**item,'destination':dest})
    except Exception:provider_warning='Attractions provider is temporarily unavailable; showing cached results.'
-   data=DestinationSerializer(dest).data
+   data=enrich(dest)
    if provider_warning:data['warning']=provider_warning
    return Response(data)
   except Exception:
@@ -157,17 +207,21 @@ class GuideRequestViewSet(OwnerMixin,viewsets.ModelViewSet):
  def create(self,request,*args,**kwargs):
   if request.user.role!='TOURIST':return Response({'detail':'Tourist account required.'},status=403)
   serializer=self.get_serializer(data=request.data);serializer.is_valid(raise_exception=True);data=serializer.validated_data
-  if data['trip'].tourist_id!=request.user.id:return Response({'detail':'This trip is not yours.'},status=403)
+  trip=data.get('trip')
+  if trip and trip.tourist_id!=request.user.id:return Response({'detail':'This trip is not yours.'},status=403)
   if data['service'].guide_id!=data['guide'].id:return Response({'detail':'Service and guide do not match.'},status=400)
-  if data['service'].coverage.destination_id!=data['trip'].destination_id:return Response({'detail':'This service does not cover your trip destination.'},status=400)
+  destination=data['service'].coverage.destination
+  if not destination:return Response({'detail':'This service needs a city coverage area.'},status=400)
+  if trip and destination.id!=trip.destination_id:return Response({'detail':'This service does not cover your trip destination.'},status=400)
   if data['start']<=timezone.now():return Response({'detail':'Choose a future tour time.'},status=400)
   tour_day=timezone.localtime(data['start'],ZoneInfo(data['guide'].timezone)).date()
-  if not data['trip'].start_date<=tour_day<=data['trip'].end_date:return Response({'detail':'Tour date must fall within your trip.'},status=400)
+  if trip and not trip.start_date<=tour_day<=trip.end_date:return Response({'detail':'Tour date must fall within your trip.'},status=400)
   if data['people']>data['service'].max_group_size:return Response({'detail':'Group size exceeds this service.'},status=400)
   if data['end']<=data['start'] or not AvailabilityService.contains(data['guide'],data['start'],data['end']):return Response({'detail':'Guide is unavailable during that time.'},status=409)
   if not data['service'].active:return Response({'detail':'This service is inactive.'},status=400)
   with transaction.atomic():
-   item=serializer.save(tourist=request.user)
+   if not trip:trip=Trip.objects.create(tourist=request.user,destination=destination,title=f'{destination.name} · {data["service"].title}',start_date=tour_day,end_date=tour_day)
+   item=serializer.save(tourist=request.user,trip=trip)
    conversation=Conversation.objects.create(request=item);conversation.participants.add(request.user,item.guide.user)
    Notification.objects.create(user=item.guide.user,kind='GUIDE_REQUEST',title='New guide request',body=f'{request.user.get_full_name()} requested {item.service.title}.')
   return Response(self.get_serializer(item).data,status=201)
@@ -183,7 +237,7 @@ class GuideRequestViewSet(OwnerMixin,viewsets.ModelViewSet):
   return Response(self.get_serializer(item).data)
 class BookingViewSet(viewsets.ReadOnlyModelViewSet):
  serializer_class=BookingSerializer
- def get_queryset(self):return Booking.objects.filter(Q(tourist=self.request.user)|Q(guide__user=self.request.user)).select_related('guide__user','tourist','service')
+ def get_queryset(self):return Booking.objects.filter(Q(tourist=self.request.user)|Q(guide__user=self.request.user)).select_related('guide__user','tourist','service').order_by('-start','-pk')
  @action(detail=False,methods=['post'])
  def confirm(self,request):
   req=get_object_or_404(GuideRequest.objects.select_related('guide','service','trip__destination'),pk=request.data.get('request_id'))

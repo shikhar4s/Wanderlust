@@ -23,6 +23,7 @@ else: DATABASES={'default':{'ENGINE':'django.db.backends.sqlite3','NAME':BASE_DI
 AUTH_PASSWORD_VALIDATORS=[{'NAME':'django.contrib.auth.password_validation.MinimumLengthValidator'}]
 LANGUAGE_CODE='en-us';TIME_ZONE='UTC';USE_I18N=True;USE_TZ=True
 STATIC_URL='static/';DEFAULT_AUTO_FIELD='django.db.models.BigAutoField';AUTH_USER_MODEL='core.User'
+MEDIA_URL='/media/';MEDIA_ROOT=BASE_DIR/'media'
 CORS_ALLOWED_ORIGINS=os.getenv('CORS_ALLOWED_ORIGINS','http://localhost:5173,http://127.0.0.1:5173').split(',')
 REST_FRAMEWORK={'DEFAULT_AUTHENTICATION_CLASSES':['rest_framework_simplejwt.authentication.JWTAuthentication'],'DEFAULT_PERMISSION_CLASSES':['rest_framework.permissions.IsAuthenticated'],'DEFAULT_PAGINATION_CLASS':'rest_framework.pagination.PageNumberPagination','PAGE_SIZE':20,'DEFAULT_THROTTLE_CLASSES':['rest_framework.throttling.AnonRateThrottle','rest_framework.throttling.UserRateThrottle'],'DEFAULT_THROTTLE_RATES':{'anon':'60/min','user':'300/min'}}
 if os.getenv('REDIS_URL'):

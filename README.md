@@ -17,13 +17,17 @@ Wanderlust is a travel-planning and local-guide marketplace for building geograp
 - Review eligibility tied to the Tourist on a completed booking.
 - Separate Tourist and Guide signup/login routes backed by JWT, unique email identities, persisted sessions and matching frontend/backend role enforcement.
 - Live global destination geocoding plus OpenStreetMap/Overpass attraction discovery with a cached-results fallback.
+- Prefix city suggestions, city/attraction photos when a matching free image is available, and a photo-backed Tourist dashboard.
+- Expanded Tourist and Guide profiles with account details and JPG/PNG/WebP uploads (5 MB limit).
+- Guide requests can reuse a saved trip or create a one-day trip automatically, then appear under Tourist requests until confirmed.
+- A floating Travel Assistant panel appears throughout both authenticated portals.
 - Tourist persistence: select attractions, generate/store a dated trip, reorder/move/add/remove stops, optimize a day, save notes and reopen after refresh.
 - Guide profile, coverage, services, weekly hours, exceptions and booking toggle screens backed by Django APIs.
 - Request, REST chat, price offers, booking confirmation/cancellation, reviews and notifications backed by database records.
 
 ## Current implementation boundary
 
-Core Tourist and Guide write flows are connected to the backend. Messaging uses authenticated Channels WebSockets with periodic REST refresh as a fallback. AI guidance requires a configured server-side OpenAI-compatible provider (`AI_API_KEY`, `AI_API_URL`, `AI_MODEL`). Destination imagery and OpenStreetMap tile loading depend on external services. PostgreSQL/Redis and production deployment still need to be configured for concurrent use.
+Core Tourist and Guide write flows are connected to the backend. Messaging uses authenticated Channels WebSockets with periodic REST refresh as a fallback. AI guidance requires a configured server-side OpenAI-compatible provider (`AI_API_KEY`, `AI_API_URL`, `AI_MODEL`). City/attraction imagery is best-effort and depends on a matching free Wikimedia thumbnail; places without one use the city's image. OpenStreetMap tiles and live place search depend on external services. Uploaded profile photos are stored in `backend/media/` during development; production needs persistent object storage. PostgreSQL/Redis and production deployment still need to be configured for concurrent use.
 
 ## Architecture
 
@@ -95,13 +99,13 @@ Core variables are documented in `.env.example`. Provider keys are optional duri
 
 Suggested providers:
 
-- Geocoding: OpenStreetMap Nominatim (development-friendly usage policy; cache and respect limits).
+- City search and suggestions: Open-Meteo Geocoding API (GeoNames data), or another compatible provider for commercial use.
 - Places: OpenTripMap, Foursquare or Google Places through `PlacesService`.
 - Routing: OSRM, Mapbox or Google Routes through `RoutingService`.
-- Images: Unsplash or another licensed image provider through an image service.
+- Images: matching free Wikipedia/Wikimedia page thumbnails, with a city-level fallback.
 - AI: an OpenAI-compatible chat completion endpoint configured only on the server.
 
-The default public Nominatim service is suitable only for low-volume development. Its [usage policy](https://operations.osmfoundation.org/policies/nominatim/) caps an application at one request per second and requires identification, caching, and attribution. The current cache/rate slot is process-local; configure `GEOCODING_API_URL` to an appropriate provider or self-hosted instance before scaling across workers. Public Overpass instances may also be overloaded, so the UI shows cached attraction data when available.
+The Open-Meteo geocoding endpoint supports prefix search; check its licence and configure a suitable provider for commercial deployment. The public Nominatim endpoint must not be used for autocomplete. Public Overpass instances may be overloaded, so the UI shows cached attraction data when available.
 
 ## Core logic
 
