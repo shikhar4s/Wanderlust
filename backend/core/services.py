@@ -2,6 +2,7 @@ from math import radians,sin,cos,asin,sqrt
 import os
 from hashlib import sha256
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
 import httpx
 from django.conf import settings
 from django.core.cache import cache
@@ -81,11 +82,11 @@ class ImageService:
   return ''
 
  @staticmethod
- def find_photos(names):
-  """Fetch free page thumbnails in one request; omit unmatched places honestly."""
+ def find_photos(names,city=''):
+  """Find place-specific Wikimedia thumbnails, leaving unverified matches empty."""
   titles=list(dict.fromkeys(name.strip() for name in names if name.strip()))[:50]
   if not titles:return {}
-  key='photos:'+sha256('|'.join(titles).encode()).hexdigest()
+  key='photos:'+sha256((city+'|'+ '|'.join(titles)).encode()).hexdigest()
   saved=cache.get(key)
   if saved is not None:return saved
   try:
@@ -94,6 +95,24 @@ class ImageService:
     response.raise_for_status()
     pages=response.json().get('query',{}).get('pages',{}).values()
     result={page['title'].casefold():page['thumbnail']['source'] for page in pages if 'thumbnail' in page}
+    missing=[name for name in titles if name.casefold() not in result][:20]
+    def commons_photo(name):
+     try:
+      response=client.get('https://commons.wikimedia.org/w/api.php',params={'action':'query','format':'json','generator':'search','gsrsearch':f'{name} {city} filetype:bitmap','gsrnamespace':6,'gsrlimit':5,'prop':'imageinfo','iiprop':'url','iiurlwidth':900})
+      response.raise_for_status()
+      pages=sorted(response.json().get('query',{}).get('pages',{}).values(),key=lambda page:page.get('index',99))
+      words=[word.casefold() for word in name.split() if len(word)>2]
+      for page in pages:
+       title=page.get('title','').casefold()
+       if words and sum(word in title for word in words)<max(1,len(words)-1):continue
+       info=page.get('imageinfo',[{}])[0]
+       url=info.get('thumburl') or info.get('url')
+       if url:return name.casefold(),url
+     except (httpx.HTTPError,ValueError,KeyError,IndexError):pass
+     return name.casefold(),''
+    if missing:
+     with ThreadPoolExecutor(max_workers=5) as pool:
+      result.update({name:url for name,url in pool.map(commons_photo,missing) if url})
     cache.set(key,result,timeout=24*3600)
     return result
   except (httpx.HTTPError,ValueError,KeyError):return {}

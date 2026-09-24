@@ -71,6 +71,16 @@ class AuthenticationFlowTests(TestCase):
   self.assertEqual(result.status_code,200,result.data)
   self.assertEqual(result.data['image_url'],'https://example.com/city.jpg')
   self.assertEqual(result.data['places'][0]['image_url'],'https://example.com/place.jpg')
+ def test_search_returns_only_selected_city_places(self):
+  jaipur=Destination.objects.create(name='Jaipur',country='India',latitude=26.9,longitude=75.8)
+  Place.objects.create(destination=jaipur,name='Hawa Mahal',latitude=26.9,longitude=75.8)
+  paris=Destination.objects.create(name='Paris',country='France',provider_id='openmeteo:2988507',latitude=48.85,longitude=2.35)
+  Place.objects.create(destination=paris,name='Eiffel Tower',latitude=48.85,longitude=2.29)
+  with patch('core.views.ImageService.find_photos',return_value={}):
+   result=self.client.get('/api/destinations/search/?q=Paris&city_id=openmeteo%3A2988507')
+  self.assertEqual(result.status_code,200)
+  self.assertEqual(result.data['name'],'Paris')
+  self.assertEqual([place['name'] for place in result.data['places']],['Eiffel Tower'])
  def test_tourist_profile_update_and_photo_upload(self):
   user=User.objects.create_user('mira',email='mira@example.com',role='TOURIST');TouristProfile.objects.create(user=user);self.client.force_authenticate(user)
   updated=self.client.patch('/api/auth/profile/',{'first_name':'Mira','home_city':'Pune','interests':['Food','Art']},format='json')

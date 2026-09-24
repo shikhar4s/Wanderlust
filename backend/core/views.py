@@ -84,7 +84,7 @@ class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
   def enrich(dest):
    missing=list(dest.places.filter(image_url='')[:50])
    names=[dest.name] if not dest.image_url else []
-   photos=ImageService.find_photos(names+[p.name for p in missing])
+   photos=ImageService.find_photos(names+[p.name for p in missing],city=dest.name)
    if not dest.image_url and photos.get(dest.name.casefold()):dest.image_url=photos[dest.name.casefold()];dest.save(update_fields=['image_url'])
    for place in missing:
     url=photos.get(place.name.casefold())
@@ -93,7 +93,7 @@ class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
   if cached and cached.places.exists():
    return Response(enrich(cached))
   try:
-   locations=LocationService().search(q)
+   locations=LocationService().search(city)
    if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
    hit=next((item for item in locations if item['provider_id']==selected_id),locations[0])
    dest,_=Destination.objects.update_or_create(name=hit['name'],country=hit['country'],defaults={'provider_id':hit['provider_id'],'latitude':float(hit['latitude']),'longitude':float(hit['longitude'])})
