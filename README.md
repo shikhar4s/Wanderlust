@@ -27,7 +27,7 @@ Wanderlust is a travel-planning and local-guide marketplace for building geograp
 
 ## Current implementation boundary
 
-Core Tourist and Guide write flows are connected to the backend. Messaging uses authenticated Channels WebSockets with periodic REST refresh as a fallback. AI guidance requires a configured server-side OpenAI-compatible provider (`AI_API_KEY`, `AI_API_URL`, `AI_MODEL`). City/attraction imagery is best-effort and depends on a matching free Wikimedia thumbnail; places without one use the city's image. OpenStreetMap tiles and live place search depend on external services. Uploaded profile photos are stored in `backend/media/` during development; production needs persistent object storage. PostgreSQL/Redis and production deployment still need to be configured for concurrent use.
+Core Tourist and Guide write flows are connected to the backend. Messaging uses authenticated Channels WebSockets with periodic REST refresh as a fallback. AI guidance requires a server-side Gemini API key (`GEMINI_API_KEY`); the assistant reports a clear setup error until one is added. City and attraction imagery loads progressively from Wikimedia after place results appear; unmatched places show an honest placeholder and a “Google it” link. OpenStreetMap tiles and live place search depend on external services. Uploaded profile photos are stored in `backend/media/` during development; production needs persistent object storage. PostgreSQL/Redis and production deployment still need to be configured for concurrent use.
 
 ## Architecture
 
@@ -93,6 +93,8 @@ docker compose up --build
 
 Copy `.env.example` to `.env`, replace the development values, and never commit it.
 
+For the travel assistant, create a Gemini API key in [Google AI Studio](https://aistudio.google.com/apikey). Copy `backend/.env.example` to `backend/.env`, put the key after `GEMINI_API_KEY=`, and restart the backend. The backend loads this ignored file automatically; never put the key in the frontend or send it in chat. The default model is `gemini-3.6-flash`. Google's free tier has usage limits and data-use terms; check the current [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing) before relying on it.
+
 ## Environment variables
 
 Core variables are documented in `.env.example`. Provider keys are optional during development. The app should use server-side keys only; no provider or LLM secret belongs in the Vite bundle.
@@ -100,10 +102,10 @@ Core variables are documented in `.env.example`. Provider keys are optional duri
 Suggested providers:
 
 - City search and suggestions: Open-Meteo Geocoding API (GeoNames data), or another compatible provider for commercial use.
-- Places: OpenTripMap, Foursquare or Google Places through `PlacesService`.
+- Places: OpenStreetMap/Overpass through `PlacesService`, including attractions, heritage, nature and hiking routes. A commercial provider could replace it.
 - Routing: OSRM, Mapbox or Google Routes through `RoutingService`.
 - Images: matching free Wikipedia/Wikimedia page thumbnails, with a city-level fallback.
-- AI: an OpenAI-compatible chat completion endpoint configured only on the server.
+- AI: Gemini's REST API, configured only on the server with `GEMINI_API_KEY`.
 
 The Open-Meteo geocoding endpoint supports prefix search; check its licence and configure a suitable provider for commercial deployment. The public Nominatim endpoint must not be used for autocomplete. Public Overpass instances may be overloaded, so the UI shows cached attraction data when available.
 

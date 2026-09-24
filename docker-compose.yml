@@ -19,6 +19,8 @@ services:
       POSTGRES_USER: wanderlust
       POSTGRES_PASSWORD: wanderlust_dev
       POSTGRES_HOST: db
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
   frontend:
     image: node:22-alpine
     working_dir: /app
@@ -26,4 +28,3 @@ services:
     volumes: [./frontend:/app]
     ports: ['5173:5173']
 volumes: {wanderlust_pg: {}}
-

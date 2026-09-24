@@ -3,6 +3,15 @@ import secrets
 from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 BASE_DIR=Path(__file__).resolve().parent.parent
+# Keep local provider credentials on the server, outside tracked source files.
+local_env=BASE_DIR/'.env'
+if local_env.exists():
+ for line in local_env.read_text(encoding='utf-8').splitlines():
+  line=line.strip()
+  if not line or line.startswith('#') or '=' not in line:continue
+  name,value=line.split('=',1)
+  name=name.strip()
+  if name.isidentifier() and not os.environ.get(name):os.environ[name]=value.strip().strip('"\'')
 DEBUG=os.getenv('DJANGO_DEBUG','true').lower()=='true'
 SECRET_KEY=os.getenv('DJANGO_SECRET_KEY')
 if not SECRET_KEY:
@@ -22,7 +31,7 @@ if os.getenv('POSTGRES_DB'):
 else: DATABASES={'default':{'ENGINE':'django.db.backends.sqlite3','NAME':BASE_DIR/'db.sqlite3'}}
 AUTH_PASSWORD_VALIDATORS=[{'NAME':'django.contrib.auth.password_validation.MinimumLengthValidator'}]
 LANGUAGE_CODE='en-us';TIME_ZONE='UTC';USE_I18N=True;USE_TZ=True
-STATIC_URL='static/';DEFAULT_AUTO_FIELD='django.db.models.BigAutoField';AUTH_USER_MODEL='core.User'
+STATIC_URL='/static/';STATIC_ROOT=BASE_DIR/'staticfiles';DEFAULT_AUTO_FIELD='django.db.models.BigAutoField';AUTH_USER_MODEL='core.User'
 MEDIA_URL='/media/';MEDIA_ROOT=BASE_DIR/'media'
 CORS_ALLOWED_ORIGINS=os.getenv('CORS_ALLOWED_ORIGINS','http://localhost:5173,http://127.0.0.1:5173').split(',')
 REST_FRAMEWORK={'DEFAULT_AUTHENTICATION_CLASSES':['rest_framework_simplejwt.authentication.JWTAuthentication'],'DEFAULT_PERMISSION_CLASSES':['rest_framework.permissions.IsAuthenticated'],'DEFAULT_PAGINATION_CLASS':'rest_framework.pagination.PageNumberPagination','PAGE_SIZE':20,'DEFAULT_THROTTLE_CLASSES':['rest_framework.throttling.AnonRateThrottle','rest_framework.throttling.UserRateThrottle'],'DEFAULT_THROTTLE_RATES':{'anon':'60/min','user':'300/min'}}

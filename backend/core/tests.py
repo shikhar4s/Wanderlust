@@ -1,10 +1,11 @@
 from datetime import timedelta
+import httpx
 from django.core.exceptions import ValidationError
 from django.test import TestCase,TransactionTestCase
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from .models import *
-from .services import ItineraryService,AvailabilityService
+from .services import ItineraryService,AvailabilityService,PlacesService,AIService,ImageService
 from rest_framework.test import APIClient
 from unittest.mock import patch
 from asgiref.sync import async_to_sync
@@ -55,32 +56,83 @@ class AuthenticationFlowTests(TestCase):
  def test_duplicate_email_rejected(self):
   payload={'name':'Mira Sen','email':'mira@example.com','password':'StrongPass123','confirm_password':'StrongPass123','terms':True,'role':'TOURIST'};self.assertEqual(self.client.post('/api/auth/signup/',payload,format='json').status_code,201);self.assertEqual(self.client.post('/api/auth/signup/',payload,format='json').status_code,400)
  def test_cached_destination_survives_provider_outage(self):
-  destination=Destination.objects.create(name='Udaipur',country='India',latitude=24.58,longitude=73.68)
+  destination=Destination.objects.create(name='Udaipur',country='India',latitude=24.58,longitude=73.68,places_synced_at=timezone.now())
   Place.objects.create(destination=destination,name='City Palace',latitude=24.57,longitude=73.68)
   with patch('core.views.LocationService.search',side_effect=RuntimeError('provider unavailable')),patch('core.views.ImageService.find_photos',return_value={}):
    response=self.client.get('/api/destinations/search/?q=Udaipur%2C%20India')
   self.assertEqual(response.status_code,200)
   self.assertEqual(response.data['places'][0]['name'],'City Palace')
- def test_city_suggestions_and_image_enrichment(self):
+ def test_city_suggestions_and_background_image_enrichment(self):
   with patch('core.views.LocationService.search',return_value=[{'provider_id':'openmeteo:1','name':'Jaipur','country':'India','region':'Rajasthan','latitude':26.9,'longitude':75.8}]):
    suggestions=self.client.get('/api/destinations/suggest/?q=Jai')
    self.assertEqual(suggestions.status_code,200)
    self.assertEqual(suggestions.data['results'][0]['name'],'Jaipur')
-   with patch('core.views.PlacesService.nearby',return_value=[{'provider_id':'osm:way:1','name':'Hawa Mahal','description':'Palace','category':'attraction','latitude':26.9,'longitude':75.8,'rating':None,'image_url':''}]),patch('core.views.ImageService.find_photos',return_value={'jaipur':'https://example.com/city.jpg','hawa mahal':'https://example.com/place.jpg'}):
+   with patch('core.views.PlacesService.nearby',return_value=[{'provider_id':'osm:way:1','name':'Hawa Mahal','description':'Palace','category':'attraction','latitude':26.9,'longitude':75.8,'rating':None,'image_url':''}]),patch('core.views.ImageService.find_photos',side_effect=AssertionError('Photo lookup should not delay search')):
     result=self.client.get('/api/destinations/search/?q=Jaipur&city_id=openmeteo%3A1')
   self.assertEqual(result.status_code,200,result.data)
-  self.assertEqual(result.data['image_url'],'https://example.com/city.jpg')
-  self.assertEqual(result.data['places'][0]['image_url'],'https://example.com/place.jpg')
+  self.assertEqual(result.data['image_url'],'')
+  tourist=User.objects.create_user('traveler',email='traveler@example.com',role='TOURIST');self.client.force_authenticate(tourist)
+  with patch('core.views.ImageService.find_photos',return_value={'jaipur':'https://example.com/city.jpg','hawa mahal':'https://example.com/place.jpg'}):
+   photos=self.client.post(f"/api/destinations/{result.data['id']}/photos/",{'place_ids':[result.data['places'][0]['id']]},format='json')
+  self.assertEqual(photos.status_code,200,photos.data)
+  self.assertEqual(photos.data['destination_image_url'],'https://example.com/city.jpg')
+  self.assertEqual(photos.data['photos'][str(result.data['places'][0]['id'])],{'url':'https://example.com/place.jpg','kind':'place'})
  def test_search_returns_only_selected_city_places(self):
   jaipur=Destination.objects.create(name='Jaipur',country='India',latitude=26.9,longitude=75.8)
   Place.objects.create(destination=jaipur,name='Hawa Mahal',latitude=26.9,longitude=75.8)
-  paris=Destination.objects.create(name='Paris',country='France',provider_id='openmeteo:2988507',latitude=48.85,longitude=2.35)
+  paris=Destination.objects.create(name='Paris',country='France',provider_id='openmeteo:2988507',latitude=48.85,longitude=2.35,places_synced_at=timezone.now())
   Place.objects.create(destination=paris,name='Eiffel Tower',latitude=48.85,longitude=2.29)
   with patch('core.views.ImageService.find_photos',return_value={}):
    result=self.client.get('/api/destinations/search/?q=Paris&city_id=openmeteo%3A2988507')
   self.assertEqual(result.status_code,200)
   self.assertEqual(result.data['name'],'Paris')
   self.assertEqual([place['name'] for place in result.data['places']],['Eiffel Tower'])
+ def test_same_named_cities_keep_separate_places(self):
+  cities=[{'provider_id':'openmeteo:101','name':'Manali','country':'India','region':'Tamil Nadu','latitude':13.17,'longitude':80.26},{'provider_id':'openmeteo:202','name':'Manali','country':'India','region':'Himachal Pradesh','latitude':32.24,'longitude':77.19}]
+  def nearby(lat,lng):return [{'provider_id':f'osm:node:{int(lat)}','name':'Hill Trail' if lat>20 else 'City Park','description':'Place','category':'trek' if lat>20 else 'nature','latitude':lat,'longitude':lng,'rating':None,'image_url':''}]
+  with patch('core.views.LocationService.search',return_value=cities),patch('core.views.PlacesService.nearby',side_effect=nearby):
+   south=self.client.get('/api/destinations/search/?q=Manali&city_id=openmeteo%3A101')
+   north=self.client.get('/api/destinations/search/?q=Manali&city_id=openmeteo%3A202')
+  self.assertEqual(south.status_code,200,south.data)
+  self.assertEqual(north.status_code,200,north.data)
+  self.assertNotEqual(south.data['id'],north.data['id'])
+  self.assertEqual(north.data['region'],'Himachal Pradesh')
+  self.assertEqual([place['name'] for place in north.data['places']],['Hill Trail'])
+  self.assertEqual([place['name'] for place in south.data['places']],['City Park'])
+ def test_wikimedia_thumbnails_use_working_upload_host(self):
+  url='https://thumb.wikimedia.org/wikipedia/commons/thumb/a/b/test.jpg/960px-test.jpg'
+  self.assertEqual(ImageService.normalize_url(url),'https://upload.wikimedia.org/wikipedia/commons/thumb/a/b/test.jpg/960px-test.jpg')
+  self.assertEqual(ImageService.from_tags({'image':url}),ImageService.normalize_url(url))
+ def test_geotagged_nearby_image_is_labeled_not_claimed_as_exact(self):
+  destination=Destination.objects.create(name='Ajmer',country='India',region='Rajasthan',latitude=26.45,longitude=74.64)
+  place=Place.objects.create(destination=destination,name='Small Viewpoint',latitude=26.45,longitude=74.64)
+  tourist=User.objects.create_user('nearby',email='nearby@example.com',role='TOURIST');self.client.force_authenticate(tourist)
+  with patch('core.views.ImageService.find_photos',return_value={}),patch('core.views.ImageService.find_nearby_photos',return_value={place.id:'https://upload.wikimedia.org/example.jpg'}):
+   result=self.client.post(f'/api/destinations/{destination.id}/photos/',{'place_ids':[place.id]},format='json')
+  self.assertEqual(result.status_code,200)
+  self.assertEqual(result.data['photos'][str(place.id)]['kind'],'nearby')
+  self.assertEqual(Place.objects.get(pk=place.id).image_kind,'nearby')
+ def test_browsed_city_coordinates_create_correct_destination(self):
+  with patch('core.views.PlacesService.nearby',return_value=[]),patch('core.views.LocationService.search',return_value=[]):
+   result=self.client.get('/api/destinations/search/?q=Manali&city_id=csc%3AIN%3AHP%3A123&country=India&region=Himachal%20Pradesh&latitude=32.24&longitude=77.19')
+  self.assertEqual(result.status_code,200,result.data)
+  self.assertEqual((result.data['name'],result.data['region'],result.data['country']),('Manali','Himachal Pradesh','India'))
+ def test_browsed_city_uses_more_precise_live_coordinates_when_available(self):
+  live=[{'provider_id':'openmeteo:1','name':'Jaipur','country':'India','region':'Rajasthan','latitude':26.91962,'longitude':75.78781}]
+  with patch('core.views.LocationService.search',return_value=live),patch('core.views.PlacesService.nearby',return_value=[]):
+   result=self.client.get('/api/destinations/search/?q=Jaipur&city_id=csc%3AIN%3ARJ%3A132201&country=India&region=Rajasthan&latitude=27&longitude=76')
+  self.assertEqual(result.status_code,200,result.data)
+  self.assertAlmostEqual(result.data['latitude'],26.91962)
+ def test_live_place_categories_include_treks_and_nature(self):
+  elements=[{'type':'node','id':1,'lat':26.9,'lon':75.8,'tags':{'name':'Ridge Walk','route':'hiking'}},{'type':'node','id':2,'lat':26.91,'lon':75.81,'tags':{'name':'Waterfall','natural':'waterfall'}}]
+  response=httpx.Response(200,json={'elements':elements},request=httpx.Request('POST','https://overpass.example/api'))
+  with patch('core.services.httpx.Client') as client,patch('core.services.ImageService.find_photos',return_value={}):
+   client.return_value.__enter__.return_value.post.return_value=response
+   places=PlacesService().nearby(26.9,75.8)
+   query=client.return_value.__enter__.return_value.post.call_args.kwargs['data']['data']
+  self.assertEqual({place['category'] for place in places},{'trek','nature'})
+  self.assertIn('700',query)
+  self.assertIn('hiking',query)
  def test_tourist_profile_update_and_photo_upload(self):
   user=User.objects.create_user('mira',email='mira@example.com',role='TOURIST');TouristProfile.objects.create(user=user);self.client.force_authenticate(user)
   updated=self.client.patch('/api/auth/profile/',{'first_name':'Mira','home_city':'Pune','interests':['Food','Art']},format='json')
@@ -108,10 +160,35 @@ class ConnectedFlowTests(TestCase):
   self.auth(self.tourist)
   self.assertEqual(self.client.get('/api/guide-account/mine/').status_code,403)
   self.assertEqual(self.client.post('/api/services/',{'title':'Not allowed'},format='json').status_code,403)
-  with patch.dict('os.environ',{'AI_API_KEY':'','AI_API_URL':'','AI_MODEL':''}):
+  with patch.dict('os.environ',{'GEMINI_API_KEY':''}):
    response=self.client.post('/api/assistant/ask/',{'question':'What should I see?','trip_id':self.trip.id},format='json')
   self.assertEqual(response.status_code,503)
-  self.assertIn('not configured',response.data['detail'])
+  self.assertIn('Gemini API key',response.data['detail'])
+ def test_gemini_response_is_returned_without_mutating_trip(self):
+  response=httpx.Response(200,json={'candidates':[{'content':{'parts':[{'text':'Visit the fort early.'}]}}]},request=httpx.Request('POST','https://generativelanguage.googleapis.com'))
+  with patch.dict('os.environ',{'GEMINI_API_KEY':'test-key','GEMINI_MODEL':'gemini-3.6-flash'}),patch('core.services.httpx.Client') as client:
+   client.return_value.__enter__.return_value.post.return_value=response
+   result=AIService().advise('Trip in Gwalior','Where should I go?')
+   kwargs=client.return_value.__enter__.return_value.post.call_args.kwargs
+  self.assertEqual(result,{'answer':'Visit the fort early.','mutated_trip':False})
+  self.assertEqual(kwargs['headers']['x-goog-api-key'],'test-key')
+  self.assertEqual(kwargs['json']['contents'][0]['parts'][0]['text'],'Where should I go?')
+ def test_all_destination_places_are_available_to_planner(self):
+  self.auth(self.tourist)
+  for index in range(25):Place.objects.create(destination=self.destination,name=f'Extra {index}',latitude=26.2,longitude=78.17)
+  response=self.client.get(f'/api/places/?destination={self.destination.id}')
+  self.assertEqual(response.status_code,200)
+  self.assertEqual(len(response.data),28)
+ def test_optimize_day_saves_a_shorter_route(self):
+  self.auth(self.tourist)
+  day=TripDay.objects.create(trip=self.trip,date=self.trip.start_date,position=1)
+  for index,place in enumerate([self.places[0],self.places[2],self.places[1]],1):TripStop.objects.create(day=day,place=place,position=index)
+  result=self.client.post(f'/api/trips/{self.trip.id}/optimize/',{'day_id':day.id},format='json')
+  self.assertEqual(result.status_code,200,result.data)
+  order=[item['place']['name'] for item in result.data['days'][0]['stops']]
+  self.assertIn(order,(['Place 0','Place 1','Place 2'],['Place 2','Place 1','Place 0']))
+  refreshed=self.client.get(f'/api/trips/{self.trip.id}/')
+  self.assertEqual([item['place']['name'] for item in refreshed.data['days'][0]['stops']],order)
  def test_trip_generation_edit_and_ownership_persist(self):
   self.auth(self.tourist)
   response=self.client.post(f'/api/trips/{self.trip.id}/generate/',{'place_ids':[p.id for p in self.places]},format='json')

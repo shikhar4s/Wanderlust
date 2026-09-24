@@ -37,6 +37,8 @@ class PlaceSerializer(serializers.ModelSerializer):
 class DestinationSerializer(serializers.ModelSerializer):
  places=PlaceSerializer(many=True,read_only=True)
  class Meta:model=Destination;fields='__all__'
+class DestinationSummarySerializer(serializers.ModelSerializer):
+ class Meta:model=Destination;fields=('id','name','region','country','latitude','longitude','image_url')
 class TripStopSerializer(serializers.ModelSerializer):
  place=PlaceSerializer(read_only=True)
  class Meta:model=TripStop;fields='__all__'
@@ -45,7 +47,7 @@ class TripDaySerializer(serializers.ModelSerializer):
  class Meta:model=TripDay;fields='__all__'
 class TripSerializer(serializers.ModelSerializer):
  days=TripDaySerializer(many=True,read_only=True)
- destination_detail=DestinationSerializer(source='destination',read_only=True)
+ destination_detail=DestinationSummarySerializer(source='destination',read_only=True)
  class Meta:model=Trip;fields='__all__';read_only_fields=['tourist']
  def validate(self,data):
   start=data.get('start_date',getattr(self.instance,'start_date',None));end=data.get('end_date',getattr(self.instance,'end_date',None))

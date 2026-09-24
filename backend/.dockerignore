@@ -1,0 +1,8 @@
+.env
+.venv
+.dev-secret
+db.sqlite3*
+media/
+__pycache__/
+*.pyc
+*.log

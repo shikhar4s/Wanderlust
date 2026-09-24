@@ -26,11 +26,11 @@ class GuideProfile(models.Model):
  bio=models.TextField(blank=True);photo_url=models.URLField(blank=True);languages=models.JSONField(default=list);specialties=models.JSONField(default=list);years_experience=models.PositiveSmallIntegerField(default=0);accepting_bookings=models.BooleanField(default=True);onboarding_complete=models.BooleanField(default=False);timezone=models.CharField(max_length=64,default='UTC')
 
 class Destination(models.Model):
- name=models.CharField(max_length=160);country=models.CharField(max_length=120);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True);image_url=models.URLField(blank=True)
- class Meta: constraints=[models.UniqueConstraint(fields=['name','country'],name='unique_destination')]
+ name=models.CharField(max_length=160);country=models.CharField(max_length=120);region=models.CharField(max_length=160,blank=True);latitude=models.FloatField();longitude=models.FloatField();provider_id=models.CharField(max_length=200,blank=True,db_index=True);image_url=models.URLField(blank=True);places_synced_at=models.DateTimeField(null=True,blank=True)
+ class Meta: constraints=[models.UniqueConstraint(fields=['name','country','region'],name='unique_destination_region')]
 
 class Place(models.Model):
- destination=models.ForeignKey(Destination,on_delete=models.CASCADE,related_name='places');name=models.CharField(max_length=200);description=models.TextField(blank=True);category=models.CharField(max_length=80,blank=True);latitude=models.FloatField();longitude=models.FloatField();rating=models.DecimalField(max_digits=3,decimal_places=1,null=True,blank=True);image_url=models.URLField(blank=True);provider_id=models.CharField(max_length=200,blank=True,db_index=True)
+ destination=models.ForeignKey(Destination,on_delete=models.CASCADE,related_name='places');name=models.CharField(max_length=200);description=models.TextField(blank=True);category=models.CharField(max_length=80,blank=True);latitude=models.FloatField();longitude=models.FloatField();rating=models.DecimalField(max_digits=3,decimal_places=1,null=True,blank=True);image_url=models.URLField(blank=True);image_kind=models.CharField(max_length=16,blank=True);provider_id=models.CharField(max_length=200,blank=True,db_index=True)
 
 class GuideCoverage(models.Model):
  class Level(models.TextChoices): CITY='CITY';REGION='REGION';AREA='AREA';PLACE='PLACE'

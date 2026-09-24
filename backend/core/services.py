@@ -1,7 +1,6 @@
 from math import radians,sin,cos,asin,sqrt
 import os
 from hashlib import sha256
-from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 import httpx
 from django.conf import settings
@@ -42,21 +41,35 @@ class ItineraryService:
 class LocationService:
  endpoint=os.getenv('GEOCODING_API_URL','https://geocoding-api.open-meteo.com/v1/search')
  def search(self,query):
-  key='geocode:'+sha256(query.casefold().strip().encode()).hexdigest()
+  key='geocode:v2:'+sha256(query.casefold().strip().encode()).hexdigest()
   saved=cache.get(key)
   if saved is not None:return saved
   with httpx.Client(timeout=8,trust_env=False) as client:
-   response=client.get(self.endpoint,params={'name':query,'count':8,'language':'en','format':'json'});response.raise_for_status()
-   data=[{'provider_id':f"openmeteo:{item['id']}",'name':item['name'],'country':item.get('country',''),'region':item.get('admin1',''),'latitude':item['latitude'],'longitude':item['longitude']} for item in response.json().get('results',[]) if item.get('feature_code','').startswith('PPL')]
+   response=client.get(self.endpoint,params={'name':query,'count':30,'language':'en','format':'json'});response.raise_for_status()
+   data=[];seen=set()
+   for item in response.json().get('results',[]):
+    if not item.get('feature_code','').startswith('PPL'):continue
+    identity=(item['name'].casefold(),item.get('admin1','').casefold(),item.get('country','').casefold())
+    if identity in seen:continue
+    seen.add(identity)
+    data.append({'provider_id':f"openmeteo:{item['id']}",'name':item['name'],'country':item.get('country',''),'region':item.get('admin1',''),'latitude':item['latitude'],'longitude':item['longitude']})
    cache.set(key,data,timeout=24*3600)
    return data
 
 class PlacesService:
  endpoints=(os.getenv('OVERPASS_API_URL','https://overpass.kumi.systems/api/interpreter'),'https://overpass-api.de/api/interpreter')
- def nearby(self,lat,lng,radius_km=15):
-  query=f'[out:json][timeout:15];(nwr["tourism"~"attraction|museum|viewpoint|gallery"](around:{int(radius_km*1000)},{lat},{lng}););out center tags 40;'
+ def nearby(self,lat,lng,radius_km=25):
+  area=f'(around:{int(radius_km*1000)},{lat},{lng})'
+  query=('[out:json][timeout:30];('
+   f'nwr["tourism"~"^(attraction|museum|viewpoint|gallery|artwork|zoo|theme_park|picnic_site)$"]{area};'
+   f'nwr["historic"~"^(castle|fort|monument|ruins|archaeological_site|memorial|city_gate)$"]{area};'
+   f'nwr["natural"~"^(peak|waterfall|cave_entrance|beach|spring)$"]{area};'
+   f'nwr["leisure"~"^(park|nature_reserve|garden)$"]{area};'
+   f'nwr["route"~"^(hiking|foot)$"]{area};'
+   f'nwr["highway"="path"]["sac_scale"]{area};'
+   ');out center tags 700;')
   raw=None;last_error=None
-  with httpx.Client(timeout=22,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0'}) as client:
+  with httpx.Client(timeout=38,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0'}) as client:
    for endpoint in self.endpoints:
     try:
      response=client.post(endpoint,data={'data':query});response.raise_for_status();raw=response.json().get('elements',[]);break
@@ -67,18 +80,32 @@ class PlacesService:
    tags=item.get('tags',{});name=tags.get('name') or tags.get('name:en')
    point=item.get('center',item)
    if not name or 'lat' not in point:continue
-   results.append({'provider_id':f"osm:{item['type']}:{item['id']}",'name':name,'description':tags.get('description') or tags.get('historic') or tags.get('tourism','Attraction').replace('_',' ').title(),'category':tags.get('tourism') or tags.get('historic') or 'attraction','latitude':point['lat'],'longitude':point['lon'],'rating':None,'image_url':ImageService.from_tags(tags)})
-  photos=ImageService.find_photos([item['name'] for item in results if not item['image_url']])
-  for item in results:
-   if not item['image_url']:item['image_url']=photos.get(item['name'].casefold(),'')
+   natural=tags.get('natural','');tourism=tags.get('tourism','');historic=tags.get('historic','');leisure=tags.get('leisure','')
+   category=('trek' if tags.get('route') in ('hiking','foot') or tags.get('sac_scale') or natural=='peak' else
+             'museum' if tourism=='museum' else 'viewpoint' if tourism=='viewpoint' else
+             'nature' if natural or leisure in ('park','nature_reserve','garden') else
+             'heritage' if historic else 'gallery' if tourism=='gallery' else 'attraction')
+   photo=ImageService.from_tags(tags)
+   results.append({'provider_id':f"osm:{item['type']}:{item['id']}",'name':name,'description':tags.get('description') or tags.get('description:en') or historic or natural or tourism.replace('_',' ').title() or leisure.replace('_',' ').title() or 'Place to explore','category':category,'latitude':point['lat'],'longitude':point['lon'],'rating':None,'image_url':photo,'image_kind':'place' if photo else ''})
+  results.sort(key=lambda item:(distance_coords(lat,lng,item['latitude'],item['longitude']),item['name'].casefold()))
   return results
+
+def distance_coords(lat1,lon1,lat2,lon2):
+ dlat=radians(lat2-lat1);dlon=radians(lon2-lon1)
+ return 2*6371*asin(sqrt(sin(dlat/2)**2+cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2))
 
 class ImageService:
  @staticmethod
+ def normalize_url(url):
+  if not url:return ''
+  return url.replace('https://thumb.wikimedia.org/', 'https://upload.wikimedia.org/', 1) if url.startswith('https://thumb.wikimedia.org/') else url
+
+ @staticmethod
  def from_tags(tags):
   image=tags.get('image') or tags.get('wikimedia_commons') or ''
-  if image.startswith('https://') or image.startswith('http://'):return image
-  if image.startswith('File:'):return 'https://commons.wikimedia.org/wiki/Special:FilePath/'+quote(image[5:])+'?width=900'
+  if image.startswith('https://') or image.startswith('http://'):return ImageService.normalize_url(image)
+  # FilePath redirects to a thumbnail host that may reject hotlinks; enrich it through the API instead.
+  if image.startswith('File:'):return ''
   return ''
 
  @staticmethod
@@ -88,14 +115,14 @@ class ImageService:
   if not titles:return {}
   key='photos:'+sha256((city+'|'+ '|'.join(titles)).encode()).hexdigest()
   saved=cache.get(key)
-  if saved is not None:return saved
+  if saved is not None:return {name:ImageService.normalize_url(url) for name,url in saved.items()}
   try:
    with httpx.Client(timeout=10,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0 (https://github.com/shikhar4s/Wanderlust)'}) as client:
     response=client.get('https://en.wikipedia.org/w/api.php',params={'action':'query','format':'json','prop':'pageimages','titles':'|'.join(titles),'pithumbsize':900,'pilicense':'free','redirects':1})
     response.raise_for_status()
     pages=response.json().get('query',{}).get('pages',{}).values()
-    result={page['title'].casefold():page['thumbnail']['source'] for page in pages if 'thumbnail' in page}
-    missing=[name for name in titles if name.casefold() not in result][:20]
+    result={page['title'].casefold():ImageService.normalize_url(page['thumbnail']['source']) for page in pages if 'thumbnail' in page}
+    missing=[name for name in titles if name.casefold() not in result]
     def commons_photo(name):
      try:
       response=client.get('https://commons.wikimedia.org/w/api.php',params={'action':'query','format':'json','generator':'search','gsrsearch':f'{name} {city} filetype:bitmap','gsrnamespace':6,'gsrlimit':5,'prop':'imageinfo','iiprop':'url','iiurlwidth':900})
@@ -107,7 +134,7 @@ class ImageService:
        if words and sum(word in title for word in words)<max(1,len(words)-1):continue
        info=page.get('imageinfo',[{}])[0]
        url=info.get('thumburl') or info.get('url')
-       if url:return name.casefold(),url
+       if url:return name.casefold(),ImageService.normalize_url(url)
      except (httpx.HTTPError,ValueError,KeyError,IndexError):pass
      return name.casefold(),''
     if missing:
@@ -116,6 +143,30 @@ class ImageService:
     cache.set(key,result,timeout=24*3600)
     return result
   except (httpx.HTTPError,ValueError,KeyError):return {}
+
+ @staticmethod
+ def find_nearby_photos(places):
+  """Find geotagged Commons files close to mapped places, never claiming an exact match."""
+  def lookup(place):
+   key=f'nearby-photo:{round(place.latitude,4)}:{round(place.longitude,4)}'
+   cached=cache.get(key)
+   if cached is not None:return place.id,cached
+   try:
+    with httpx.Client(timeout=8,trust_env=False,headers={'User-Agent':'WanderlustTravelPlanner/1.0 (https://github.com/shikhar4s/Wanderlust)'}) as client:
+     response=client.get('https://commons.wikimedia.org/w/api.php',params={'action':'query','format':'json','generator':'geosearch','ggscoord':f'{place.latitude}|{place.longitude}','ggsradius':600,'ggslimit':12,'ggsnamespace':6,'prop':'imageinfo','iiprop':'url|mime','iiurlwidth':900})
+     response.raise_for_status()
+     pages=sorted(response.json().get('query',{}).get('pages',{}).values(),key=lambda page:page.get('index',99))
+     words=[word.casefold() for word in place.name.split() if len(word)>3]
+     pages.sort(key=lambda page:(-sum(word in page.get('title','').casefold() for word in words),page.get('index',99)))
+     for page in pages:
+      info=page.get('imageinfo',[{}])[0]
+      url=info.get('thumburl') or info.get('url')
+      if url and info.get('mime','').startswith('image/'):
+       result=ImageService.normalize_url(url);cache.set(key,result,timeout=24*3600);return place.id,result
+   except (httpx.HTTPError,ValueError,KeyError,IndexError):pass
+   cache.set(key,'',timeout=6*3600)
+   return place.id,''
+  with ThreadPoolExecutor(max_workers=8) as pool:return {place_id:url for place_id,url in pool.map(lookup,places) if url}
 
 class RoutingService:
  """OSRM-compatible route provider boundary with a straight-line fallback."""
@@ -162,11 +213,18 @@ class AvailabilityService:
 class AIService:
  class Unavailable(Exception):pass
  def advise(self,context,prompt):
-  key=os.getenv('AI_API_KEY');url=os.getenv('AI_API_URL');model=os.getenv('AI_MODEL')
-  if not all((key,url,model)):raise self.Unavailable('The AI provider is not configured on the server yet.')
+  key=os.getenv('GEMINI_API_KEY','').strip();model=os.getenv('GEMINI_MODEL','gemini-3.6-flash').strip()
+  if not key:raise self.Unavailable('The AI assistant needs a Gemini API key. Add GEMINI_API_KEY to backend/.env and restart the server.')
+  url=f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
   try:
-   response=httpx.post(url,headers={'Authorization':f'Bearer {key}'},json={'model':model,'messages':[{'role':'system','content':'You are Wanderlust travel guidance. Give practical, concise suggestions. Never claim to change a trip. Current context: '+context},{'role':'user','content':prompt}]},timeout=25)
+   with httpx.Client(timeout=30,trust_env=False) as client:
+    response=client.post(url,headers={'x-goog-api-key':key,'Content-Type':'application/json'},json={'system_instruction':{'parts':[{'text':'You are Wanderlust, a practical travel assistant. Be concise, be honest about uncertainty, and never claim to have changed a saved trip. Current context: '+context}]},'contents':[{'role':'user','parts':[{'text':prompt}]}],'generationConfig':{'maxOutputTokens':700}})
    response.raise_for_status()
-   answer=response.json()['choices'][0]['message']['content']
+   answer='\n'.join(part.get('text','') for part in response.json()['candidates'][0]['content']['parts'] if part.get('text')).strip()
+   if not answer:raise self.Unavailable('The AI provider returned no text. Please try again.')
    return {'answer':answer,'mutated_trip':False}
-  except (httpx.HTTPError,KeyError,IndexError,TypeError):raise self.Unavailable('The AI provider is temporarily unavailable. Your trip was not changed.')
+  except httpx.HTTPStatusError as exc:
+   if exc.response.status_code==429:raise self.Unavailable('The free AI quota is busy or exhausted. Please try again later.')
+   if exc.response.status_code in (400,401,403):raise self.Unavailable('The Gemini key or model was rejected. Check backend/.env and restart the server.')
+   raise self.Unavailable('The AI provider is temporarily unavailable. Your trip was not changed.')
+  except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError):raise self.Unavailable('The AI provider is temporarily unavailable. Your trip was not changed.')

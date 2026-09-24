@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError
+from unicodedata import normalize
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -13,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser
 from .models import *
 from .serializers import *
-from .services import ItineraryService,LocationService,PlacesService,AvailabilityService,ImageService,distance_km
+from .services import ItineraryService,LocationService,PlacesService,AvailabilityService,ImageService,distance_km,distance_coords
 
 class IsTourist(BasePermission):
  def has_permission(self,request,view):return request.user.is_authenticated and request.user.role=='TOURIST'
@@ -64,55 +65,116 @@ class OwnerMixin:
  def perform_create(self,s): s.save(tourist=self.request.user)
 class DestinationViewSet(viewsets.ReadOnlyModelViewSet):
  queryset=Destination.objects.prefetch_related('places');serializer_class=DestinationSerializer
+ def get_serializer_class(self):return DestinationSummarySerializer if self.action=='list' else DestinationSerializer
  @action(detail=False,methods=['get'],permission_classes=[AllowAny])
  def suggest(self,request):
   q=request.query_params.get('q','').strip()
   if len(q)<2:return Response({'results':[]})
-  saved=[{'provider_id':d.provider_id,'name':d.name,'country':d.country,'region':'','latitude':d.latitude,'longitude':d.longitude} for d in Destination.objects.filter(name__istartswith=q)[:6]]
+  city_query=q.split(',')[0].strip()
+  qualifier=q.split(',',1)[1].strip().casefold() if ',' in q else ''
+  saved=[{'provider_id':d.provider_id,'name':d.name,'country':d.country,'region':d.region,'latitude':d.latitude,'longitude':d.longitude} for d in Destination.objects.filter(name__istartswith=city_query)[:30] if not qualifier or qualifier in (d.region.casefold(),d.country.casefold())]
   try:
+   prefix=normalize('NFKD',city_query).encode('ascii','ignore').decode('ascii').casefold()
    live=LocationService().search(q)
-   seen={item['provider_id'] or f"{item['name']}:{item['country']}" for item in live}
-   return Response({'results':(live+[item for item in saved if (item['provider_id'] or f"{item['name']}:{item['country']}") not in seen])[:8]})
+   matching=[item for item in live if not prefix or normalize('NFKD',item['name']).encode('ascii','ignore').decode('ascii').casefold().startswith(prefix)]
+   live=matching
+   seen={item['provider_id'] for item in live if item['provider_id']}
+   identities={(item['name'].casefold(),item['country'].casefold(),item['region'].casefold()) for item in live}
+   return Response({'results':(live+[item for item in saved if item['provider_id'] not in seen and (item['name'].casefold(),item['country'].casefold(),item['region'].casefold()) not in identities and (item['region'] or not any(other['name'].casefold()==item['name'].casefold() and other['country'].casefold()==item['country'].casefold() for other in live))])[:20]})
   except Exception:return Response({'results':saved,'warning':'Showing saved cities while live suggestions are unavailable.'})
  @action(detail=False,methods=['get'],permission_classes=[AllowAny])
  def search(self,request):
   q=request.query_params.get('q','').strip()
   if not q:return Response({'detail':'Enter a destination.'},status=400)
   parts=[part.strip() for part in q.split(',') if part.strip()];city=parts[0];selected_id=request.query_params.get('city_id','')
+  browsed=None
+  if selected_id.startswith('csc:'):
+   country=request.query_params.get('country','').strip()[:120];region=request.query_params.get('region','').strip()[:160]
+   try:lat=float(request.query_params.get('latitude',''));lon=float(request.query_params.get('longitude',''))
+   except (TypeError,ValueError):return Response({'detail':'Choose a city from the location list.'},status=400)
+   if not country or not region or not city or len(city)>160 or not -90<=lat<=90 or not -180<=lon<=180 or len(selected_id)>200 or len(selected_id.split(':'))!=4:return Response({'detail':'Choose a valid country, state and city.'},status=400)
+   try:
+    refined=next((item for item in LocationService().search(f'{city}, {region}') if item['name'].casefold()==city.casefold() and item['country'].casefold()==country.casefold() and item['region'].casefold()==region.casefold()),None)
+    if refined:lat=float(refined['latitude']);lon=float(refined['longitude'])
+   except Exception:pass
+   browsed=(country,region,lat,lon)
   matches=Destination.objects.prefetch_related('places').filter(name__iexact=city)
-  cached=Destination.objects.prefetch_related('places').filter(provider_id=selected_id).first() if selected_id else (matches.filter(country__iexact=parts[-1]).first() if len(parts)>1 else matches.first())
-  def enrich(dest):
-   missing=list(dest.places.filter(image_url='')[:50])
-   names=[dest.name] if not dest.image_url else []
-   photos=ImageService.find_photos(names+[p.name for p in missing],city=dest.name)
-   if not dest.image_url and photos.get(dest.name.casefold()):dest.image_url=photos[dest.name.casefold()];dest.save(update_fields=['image_url'])
-   for place in missing:
-    url=photos.get(place.name.casefold())
-    if url:place.image_url=url;place.save(update_fields=['image_url'])
-   return DestinationSerializer(Destination.objects.prefetch_related('places').get(pk=dest.pk)).data
-  if cached and cached.places.exists():
-   return Response(enrich(cached))
+  qualified=matches.filter(Q(country__iexact=parts[-1])|Q(region__iexact=parts[-1])) if len(parts)>1 else matches
+  cached=Destination.objects.prefetch_related('places').filter(provider_id=selected_id).first() if selected_id else qualified.first() if qualified.count()==1 else None
+  if browsed:
+   country,region,lat,lon=browsed
+   candidates=[item for item in matches.filter(country__iexact=country) if item.region.casefold() in ('',region.casefold()) and distance_coords(lat,lon,item.latitude,item.longitude)<5]
+   if candidates:cached=max(candidates,key=lambda item:(bool(item.places_synced_at),item.places.count()))
+  if cached and selected_id and not cached.region:
+   try:
+    location=next((item for item in LocationService().search(city) if item['provider_id']==selected_id),None)
+    if location and location['region']:
+     cached.region=location['region'];cached.save(update_fields=['region'])
+   except Exception:pass
+  if cached and cached.places_synced_at and timezone.now()-cached.places_synced_at<__import__('datetime').timedelta(hours=24):
+   data=DestinationSerializer(cached).data
+   if browsed:data['region']=browsed[1]
+   return Response(data)
   try:
-   locations=LocationService().search(city)
-   if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
-   hit=next((item for item in locations if item['provider_id']==selected_id),locations[0])
-   dest,_=Destination.objects.update_or_create(name=hit['name'],country=hit['country'],defaults={'provider_id':hit['provider_id'],'latitude':float(hit['latitude']),'longitude':float(hit['longitude'])})
+   if cached:dest=cached
+   elif browsed:
+    country,region,lat,lon=browsed
+    dest,_=Destination.objects.update_or_create(name=city,country=country,region=region,defaults={'provider_id':selected_id,'latitude':lat,'longitude':lon})
+   else:
+    locations=LocationService().search(q)
+    if not locations:return Response({'detail':'No destination found.','results':[]},status=404)
+    hit=next((item for item in locations if item['provider_id']==selected_id),None) if selected_id else locations[0]
+    if hit is None:return Response({'detail':'That city option is no longer available. Choose a city from the suggestions.'},status=404)
+    legacy=Destination.objects.filter(name=hit['name'],country=hit['country'],region='',provider_id='').first()
+    if legacy:
+     legacy.region=hit['region'];legacy.provider_id=hit['provider_id'];legacy.latitude=float(hit['latitude']);legacy.longitude=float(hit['longitude']);legacy.save(update_fields=['region','provider_id','latitude','longitude']);dest=legacy
+    else:
+     dest,_=Destination.objects.update_or_create(name=hit['name'],country=hit['country'],region=hit['region'],defaults={'provider_id':hit['provider_id'],'latitude':float(hit['latitude']),'longitude':float(hit['longitude'])})
    provider_warning=None
    try:
     live=PlacesService().nearby(dest.latitude,dest.longitude)
-    for item in live:Place.objects.update_or_create(provider_id=item.pop('provider_id'),defaults={**item,'destination':dest})
+    for item in live:
+     provider_id=item.pop('provider_id')
+     current=Place.objects.filter(destination=dest,provider_id=provider_id).first()
+     if current and current.image_url and not item['image_url']:
+      item['image_url']=current.image_url;item['image_kind']=current.image_kind
+     Place.objects.update_or_create(destination=dest,provider_id=provider_id,defaults=item)
+    dest.places_synced_at=timezone.now();dest.save(update_fields=['places_synced_at'])
    except Exception:provider_warning='Attractions provider is temporarily unavailable; showing cached results.'
-   data=enrich(dest)
+   data=DestinationSerializer(Destination.objects.prefetch_related('places').get(pk=dest.pk)).data
+   if browsed:data['region']=browsed[1]
    if provider_warning:data['warning']=provider_warning
    return Response(data)
   except Exception:
    if cached:
     data=DestinationSerializer(cached).data
+    if browsed:data['region']=browsed[1]
     data['warning']='Live search is temporarily unavailable; showing saved destination data.'
     return Response(data)
    return Response({'detail':'Live search is temporarily unavailable. Please try again.','retryable':True},status=503)
+ @action(detail=True,methods=['post'],permission_classes=[IsTourist])
+ def photos(self,request,pk=None):
+  dest=self.get_object();ids=request.data.get('place_ids',[])
+  if not isinstance(ids,list) or len(ids)>24:return Response({'detail':'Choose up to 24 places.'},status=400)
+  try:ids=[int(value) for value in ids]
+  except (TypeError,ValueError):return Response({'detail':'Invalid place IDs.'},status=400)
+  places=list(dest.places.filter(pk__in=ids))
+  names=([dest.name] if not dest.image_url else [])+[place.name for place in places if not place.image_url]
+  photos=ImageService.find_photos(names,city=dest.name)
+  if not dest.image_url and photos.get(dest.name.casefold()):
+   dest.image_url=photos[dest.name.casefold()];dest.save(update_fields=['image_url'])
+  unresolved=[]
+  for place in places:
+   url=photos.get(place.name.casefold())
+   if url and not place.image_url:place.image_url=url;place.image_kind='place';place.save(update_fields=['image_url','image_kind'])
+   elif not place.image_url:unresolved.append(place)
+  nearby=ImageService.find_nearby_photos(unresolved) if unresolved else {}
+  for place in unresolved:
+   if nearby.get(place.id):place.image_url=nearby[place.id];place.image_kind='nearby';place.save(update_fields=['image_url','image_kind'])
+  return Response({'destination_image_url':ImageService.normalize_url(dest.image_url),'photos':{str(place.id):{'url':ImageService.normalize_url(place.image_url),'kind':place.image_kind or 'place'} for place in places if place.image_url}})
 class PlaceViewSet(viewsets.ReadOnlyModelViewSet):
  queryset=Place.objects.select_related('destination');serializer_class=PlaceSerializer
+ pagination_class=None
  def get_queryset(self):
   qs=super().get_queryset();destination=self.request.query_params.get('destination');return qs.filter(destination_id=destination) if destination else qs
 class TripViewSet(OwnerMixin,viewsets.ModelViewSet):
@@ -178,10 +240,14 @@ class TripViewSet(OwnerMixin,viewsets.ModelViewSet):
  @action(detail=True,methods=['post'])
  def optimize(self,request,pk=None):
   trip=self.get_object();day=get_object_or_404(trip.days,pk=request.data.get('day_id'))
-  stops=list(day.stops.select_related('place'));route=[]
-  if stops:route.append(stops.pop(0))
-  while stops:
-   nxt=min(stops,key=lambda item:distance_km(route[-1].place,item.place));stops.remove(nxt);route.append(nxt)
+  stops=list(day.stops.select_related('place'))
+  def candidate(first):
+   remaining=[stop for stop in stops if stop.pk!=first.pk];route=[first]
+   while remaining:
+    nxt=min(remaining,key=lambda item:(distance_km(route[-1].place,item.place),item.pk));remaining.remove(nxt);route.append(nxt)
+   return route
+  routes=[candidate(first) for first in stops]
+  route=min(routes,key=lambda items:(sum(distance_km(a.place,b.place) for a,b in zip(items,items[1:])),[item.pk for item in items])) if routes else []
   with transaction.atomic():
    for stop in route:stop.position+=10000;stop.save(update_fields=['position'])
    for index,stop in enumerate(route):
